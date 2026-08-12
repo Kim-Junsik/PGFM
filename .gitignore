@@ -1,0 +1,43 @@
+# --- data (4.1GB, never commit) ---
+# data/norman/split_results.pkl ships with the dataset and IS the split source of
+# truth; there is deliberately no copy of it under version control.
+data/
+*.h5ad
+*.zip
+
+# --- 평가 전용 python 3.11 환경 (cell-eval 0.5.42) ---
+.env-celleval/
+
+# --- assets: 전부 재생성 가능하므로 추적하지 않는다 ---
+#   kegg/               scripts/download_kegg.py
+#   norman_modeled.h5ad scripts/build_data.py   (8초)
+#   norman.npz          이전 파이프라인 산출물, 현재 코드는 쓰지 않음
+# 재생성 불가능한 것(논문 그림, 이전 세션 측정값)은 docs/ 아래로 옮겼다.
+assets/
+
+# --- experiment outputs ---
+results/
+checkpoints/
+wandb/
+runs/
+*.ckpt
+*.pt
+*.pth
+
+# --- editor / agent local state ---
+# settings.local.json 은 절대 경로가 박힌 머신별 허용 목록이라 공유 대상이 아니다.
+.claude/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db

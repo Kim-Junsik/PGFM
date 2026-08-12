@@ -1,0 +1,124 @@
+"""The split must be bit-for-bit the one that ships with the dataset.
+
+This is a hard requirement, not a preference: the whole point of inheriting
+scDFM's folds is that "the authors' method won on the authors' split" cannot be
+raised against us. A split that drifts - by a rename, a re-sort, a cached copy, or
+a change in the gene space - silently destroys that argument, and nothing in the
+training loop would notice.
+
+The gene space is allowed to differ from scDFM's. The split is not.
+
+    python -m pytest tests/test_splits.py -v
+"""
+
+from __future__ import annotations
+
+import os
+import pickle
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src import config as config_module
+from src.data import splits
+
+
+@pytest.fixture(scope="module")
+def config():
+    return config_module.load()
+
+
+@pytest.fixture(scope="module")
+def reference(config):
+    with open(config["split"]["reference_pkl"], "rb") as handle:
+        return pickle.load(handle)
+
+
+# ---------------------------------------------------------------- identity
+def test_additive_is_the_shipped_file_verbatim(config, reference):
+    """Not "equivalent", not "same set" - the same lists in the same order."""
+    loaded = splits.folds(config, "additive")
+    assert len(loaded) == len(reference)
+    for i, (ours, theirs) in enumerate(zip(loaded, reference)):
+        assert list(ours["train"]) == list(theirs["train"]), f"fold {i} train order differs"
+        assert list(ours["test"]) == list(theirs["test"]), f"fold {i} test order differs"
+
+
+def test_no_cached_split_artifact_exists():
+    """A copy on disk can disagree with its source and nothing would notice."""
+    for stale in ("assets/splits_additive.pkl", "assets/splits_combinations.pkl"):
+        assert not os.path.exists(stale), (
+            f"{stale} is back; splits must be read from the shipped reference only")
+
+
+def test_folds_are_not_mutated_between_calls(config):
+    """Callers hold real dicts; a mutation must not leak into the next load."""
+    first = splits.folds(config, "additive")
+    first[0]["train"].append("SENTINEL+SENTINEL")
+    second = splits.folds(config, "additive")
+    assert "SENTINEL+SENTINEL" not in second[0]["train"]
+
+
+# ---------------------------------------------------------------- independence
+@pytest.mark.parametrize("n_hvg", [1000, 3000, 5000, None])
+def test_gene_space_does_not_touch_the_split(n_hvg, reference):
+    """The gene space is a free choice; the split must be invariant to it."""
+    altered = config_module.load([f"data.n_hvg={'null' if n_hvg is None else n_hvg}"])
+    loaded = splits.folds(altered, "additive")
+    for ours, theirs in zip(loaded, reference):
+        assert list(ours["train"]) == list(theirs["train"])
+        assert list(ours["test"]) == list(theirs["test"])
+
+
+# ---------------------------------------------------------------- structure
+def test_train_and_test_are_disjoint(config):
+    for method in ("additive", "combinations"):
+        for i, fold in enumerate(splits.folds(config, method)):
+            overlap = set(fold["train"]) & set(fold["test"])
+            assert not overlap, f"{method} fold {i} shares {overlap}"
+
+
+def test_combinations_holds_out_the_singles_of_its_test_doubles(config):
+    """This is what distinguishes the split, and what a naive baseline leaks through."""
+    for i, fold in enumerate(splits.folds(config, "combinations")):
+        genes = {g for pair in fold["test_doubles"] for g in pair.split("+")}
+        assert set(fold["held_out_genes"]) == genes, f"fold {i}"
+        assert set(fold["held_out_singles"]) == {f"{g}+ctrl" for g in genes}, f"fold {i}"
+        assert set(fold["held_out_singles"]) <= set(fold["test"]), f"fold {i}"
+        assert not set(fold["held_out_singles"]) & set(fold["train"]), (
+            f"fold {i} keeps a held-out single in train")
+
+
+def test_combinations_derives_from_the_same_reference(config, reference):
+    derived = splits.folds(config, "combinations")
+    for i, (fold, source) in enumerate(zip(derived, reference)):
+        assert list(fold["test_doubles"]) == list(source["test"][:15]), f"fold {i}"
+
+
+def test_folds_overlap_because_they_are_independent_draws(config):
+    """Five 70/30 draws, NOT a five-way partition.
+
+    Code that assumes a partition - leak-free cell selection above all - would be
+    wrong, so the property is pinned here rather than left as a comment.
+    """
+    test_sets = [set(f["test"]) for f in splits.folds(config, "additive")]
+    overlaps = [len(test_sets[i] & test_sets[j])
+                for i in range(len(test_sets)) for j in range(i + 1, len(test_sets))]
+    assert min(overlaps) > 0, "folds look like a partition; the split source changed"
+
+
+# ---------------------------------------------------------------- data agreement
+def test_every_split_condition_exists_in_the_data(config):
+    """A condition named by the split but absent from the cache is silently dropped."""
+    cache = config["data"]["cache_h5ad"]
+    if not os.path.exists(cache):
+        pytest.skip(f"{cache} not built")
+    import anndata as ad
+    conditions = set(ad.read_h5ad(cache, backed="r").obs["condition"].astype(str))
+    for method in ("additive", "combinations"):
+        for i, fold in enumerate(splits.folds(config, method)):
+            for key in ("train", "test"):
+                missing = set(fold[key]) - conditions
+                assert not missing, f"{method} fold {i} {key} names absent conditions: {missing}"
