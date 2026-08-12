@@ -91,6 +91,48 @@ def test_combinations_holds_out_the_singles_of_its_test_doubles(config):
             f"fold {i} keeps a held-out single in train")
 
 
+def test_combinations_train_keeps_every_double_it_is_allowed(config, reference):
+    """combinations holds out only 15 doubles, so 110 of the 125 stay trainable.
+
+    Deriving this from the ADDITIVE train list instead gives 88 and drops the
+    singles too, which lowers the ridge-additive target line from 0.1853 to
+    0.0487 - i.e. it makes the bar easier without anything looking wrong. The
+    numbers below are the ones the shipped combinations split had.
+    """
+    all_doubles = set(reference[0]["train"]) | set(reference[0]["test"])
+    assert len(all_doubles) == 125
+
+    for i, fold in enumerate(splits.folds(config, "combinations")):
+        assert len(fold["test_doubles"]) == 15, f"fold {i}"
+        assert len(fold["train_doubles"]) == 110, (
+            f"fold {i} has {len(fold['train_doubles'])} train doubles, expected 110")
+        assert not set(fold["train_doubles"]) & set(fold["test_doubles"]), f"fold {i}"
+
+
+def test_combinations_training_conditions_include_the_surviving_singles(config):
+    """Held-out singles must go, the rest must stay - 101 - held_out of them."""
+    cache = config["data"]["cache_h5ad"]
+    if not os.path.exists(cache):
+        pytest.skip(f"{cache} not built")
+    import anndata as ad
+    import numpy as np
+    from src.eval import baselines
+
+    adata = ad.read_h5ad(cache)
+    conditions = adata.obs["condition"].astype(str).to_numpy()
+    stats = baselines.ConditionMeans(np.zeros((len(conditions), 1), dtype=np.float32),
+                                     conditions)
+    n_singles = sum(1 for c in stats.mean if c.endswith("+ctrl"))
+
+    for i, fold in enumerate(splits.folds(config, "combinations")):
+        allowed = baselines.training_conditions(stats, fold, "combinations")
+        held = set(fold["held_out_singles"])
+        assert not set(allowed) & held, f"fold {i} lets a held-out single into train"
+        singles_kept = sum(1 for c in allowed if c.endswith("+ctrl"))
+        assert singles_kept == n_singles - len(held), (
+            f"fold {i} kept {singles_kept} singles, expected {n_singles - len(held)}")
+
+
 def test_combinations_derives_from_the_same_reference(config, reference):
     derived = splits.folds(config, "combinations")
     for i, (fold, source) in enumerate(zip(derived, reference)):

@@ -36,7 +36,8 @@ def to_celleval_label(condition: str) -> str:
 
 
 def build_pair(vae, field, data, fold: dict, config: dict,
-               rng: np.random.Generator) -> tuple[ad.AnnData, ad.AnnData]:
+               rng: np.random.Generator,
+               max_cells: int | None = None) -> tuple[ad.AnnData, ad.AnnData]:
     """Predicted and real AnnData over the fold's test conditions plus control.
 
     For every test condition the prediction transports a fresh sample of control
@@ -47,6 +48,10 @@ def build_pair(vae, field, data, fold: dict, config: dict,
     n_steps = config["train"]["n_integration_steps"]
     device = config["train"]["device"]
     control_cells = data.cells("ctrl")
+    if max_cells:
+        keep = rng.choice(control_cells.shape[0],
+                          size=min(max_cells, control_cells.shape[0]), replace=False)
+        control_cells = control_cells[keep]
 
     pred_blocks, pred_labels = [], []
     real_blocks, real_labels = [], []
@@ -61,6 +66,8 @@ def build_pair(vae, field, data, fold: dict, config: dict,
         if condition not in data.rows:
             continue
         real = data.cells(condition)
+        if max_cells and real.shape[0] > max_cells:
+            real = real[rng.choice(real.shape[0], size=max_cells, replace=False)]
         n = real.shape[0]
         pick = rng.choice(control_cells.shape[0], size=n,
                           replace=control_cells.shape[0] < n)
@@ -83,10 +90,10 @@ def build_pair(vae, field, data, fold: dict, config: dict,
 
 
 def export(vae, field, data, fold: dict, config: dict, out_dir: str,
-           rng: np.random.Generator) -> dict[str, str]:
+           rng: np.random.Generator, max_cells: int | None = None) -> dict[str, str]:
     import os
     os.makedirs(out_dir, exist_ok=True)
-    adata_pred, adata_real = build_pair(vae, field, data, fold, config, rng)
+    adata_pred, adata_real = build_pair(vae, field, data, fold, config, rng, max_cells)
     paths = {"pred": os.path.join(out_dir, "pred.h5ad"),
              "real": os.path.join(out_dir, "real.h5ad")}
     adata_pred.write_h5ad(paths["pred"])

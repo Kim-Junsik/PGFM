@@ -37,17 +37,33 @@ CELLEVAL_PYTHON = os.path.normpath(os.path.abspath(
 
 # Kept as a string and run by the other interpreter; importing cell_eval here
 # would fail, which is the whole reason for the split.
+#
+# The __main__ guard is REQUIRED, not stylistic. cell-eval parallelises with
+# multiprocessing, and on Windows (spawn start method) each child re-imports the
+# main module - without the guard every child re-runs the whole script and spawns
+# more children, so the run never terminates and never errors either. That is what
+# made the first attempts appear to hang.
 SCORING_SCRIPT = '''
 import sys, json
-from cell_eval import MetricsEvaluator
-pred, real, outdir, profile, control, pert_col = sys.argv[1:7]
-evaluator = MetricsEvaluator(
-    adata_pred=pred, adata_real=real,
-    control_pert=control, pert_col=pert_col,
-    outdir=outdir, allow_discrete=False)
-results, agg = evaluator.compute(profile=profile, break_on_error=False)
-print(json.dumps({"n_rows": int(results.height), "columns": results.columns[:20]}))
-print(results.head(20))
+import multiprocessing
+
+
+def main():
+    from cell_eval import MetricsEvaluator
+    pred, real, outdir, profile, control, pert_col = sys.argv[1:7]
+    evaluator = MetricsEvaluator(
+        adata_pred=pred, adata_real=real,
+        control_pert=control, pert_col=pert_col,
+        outdir=outdir, allow_discrete=False, num_threads=1)
+    results, agg = evaluator.compute(profile=profile, break_on_error=False)
+    print(json.dumps({"n_rows": int(results.height),
+                      "columns": results.columns[:20]}))
+    print(results.head(20))
+
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    main()
 '''
 
 
@@ -59,6 +75,9 @@ def main() -> None:
                         choices=["full", "minimal", "vcc", "de", "anndata"])
     parser.add_argument("--export-only", action="store_true",
                         help="write the h5ad pair and stop")
+    parser.add_argument("--max-cells", type=int, default=None,
+                        help="cap cells per condition; cell-eval runs a DE test per "
+                             "condition, so the full export is slow to score")
     args = parser.parse_args()
 
     checkpoint_path = os.path.join(args.run_dir, "checkpoint.pt")
@@ -84,7 +103,7 @@ def main() -> None:
     out_dir = os.path.join(args.run_dir, "celleval")
     rng = np.random.default_rng(config["eval"]["seed"])
     print("transporting control cells for every test condition ...")
-    paths = export(vae, field, data, fold, config, out_dir, rng)
+    paths = export(vae, field, data, fold, config, out_dir, rng, args.max_cells)
     print(f"  wrote {paths['pred']} and {paths['real']}  "
           f"({paths['n_cells']} cells, {paths['n_conditions']} conditions)")
 

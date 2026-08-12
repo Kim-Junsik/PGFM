@@ -203,7 +203,10 @@ def training_conditions(stats: ConditionMeans, fold: dict, method: str) -> list[
     combinations : the fold's own train list, which already excludes the
                    held-out singles.
     """
-    if method == "combinations":
-        return list(fold["train"])
     singles = [c for c in stats.mean if c.endswith(f"+{CONTROL}")]
+    if method == "combinations":
+        # Every single EXCEPT the held-out ones. Those are the whole point of the
+        # split, so reading them would leak; the rest stay available.
+        held = set(fold.get("held_out_singles", ()))
+        return list(fold["train_doubles"]) + [c for c in singles if c not in held]
     return list(fold["train"]) + singles
