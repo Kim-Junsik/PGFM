@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src import config as config_module
 from src.data import splits
+from src.data.conventions import ConditionNaming
 from src.data.dataset import ConditionSampler, PerturbationData
 from src.eval import baselines
 from src.eval.predict import evaluate_model
@@ -66,12 +67,13 @@ def main() -> None:
     log(f"run {tag}")
     log(f"config {json.dumps(config['model'])}")
 
-    data = PerturbationData(config["data"]["cache_h5ad"])
+    naming = ConditionNaming.from_config(config)
+    data = PerturbationData(config["data"]["cache_h5ad"], naming=naming)
     fold = splits.folds(config, method)[config["split"]["fold"]]
     log(f"data: {data.x.shape[0]:,} cells x {data.n_genes:,} genes, "
         f"{data.n_perturbations} perturbations")
 
-    stats = baselines.ConditionMeans(data.x, _condition_vector(data))
+    stats = baselines.ConditionMeans(data.x, _condition_vector(data), naming)
     train_conditions = baselines.training_conditions(stats, fold, method)
     sampler = ConditionSampler(data, train_conditions, config["train"]["batch_size"], rng)
     log(f"train conditions: {len(sampler.singles)} singles + {len(sampler.doubles)} doubles")

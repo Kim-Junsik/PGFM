@@ -18,7 +18,6 @@ import numpy as np
 import anndata as ad
 import pandas as pd
 
-from ..data.dataset import condition_genes
 from .predict import predict_cells
 
 # cell-eval's own vocabulary: the control level is a named perturbation, and the
@@ -27,9 +26,10 @@ PERT_COL = "target"
 CONTROL_LABEL = "non-targeting"
 
 
-def to_celleval_label(condition: str) -> str:
-    """'AHR+FEV' stays as is; 'AHR+ctrl' becomes 'AHR'; 'ctrl' becomes the control level."""
-    genes = condition_genes(condition)
+def to_celleval_label(condition: str, naming) -> str:
+    """'AHR+FEV' stays as is; 'AHR+ctrl' becomes 'AHR'; the control becomes
+    cell-eval's own control level name."""
+    genes = naming.genes(condition)
     if not genes:
         return CONTROL_LABEL
     return "+".join(genes)
@@ -47,7 +47,7 @@ def build_pair(vae, field, data, fold: dict, config: dict,
     """
     n_steps = config["train"]["n_integration_steps"]
     device = config["train"]["device"]
-    control_cells = data.cells("ctrl")
+    control_cells = data.cells(data.control_condition)
     if max_cells:
         keep = rng.choice(control_cells.shape[0],
                           size=min(max_cells, control_cells.shape[0]), replace=False)
@@ -73,7 +73,7 @@ def build_pair(vae, field, data, fold: dict, config: dict,
                           replace=control_cells.shape[0] < n)
         predicted = predict_cells(vae, field, control_cells[pick], condition,
                                   data.pert_index, n_steps, device)
-        label = to_celleval_label(condition)
+        label = to_celleval_label(condition, data.naming)
         pred_blocks.append(predicted)
         pred_labels += [label] * n
         real_blocks.append(real)

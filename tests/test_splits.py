@@ -151,6 +151,50 @@ def test_folds_overlap_because_they_are_independent_draws(config):
     assert min(overlaps) > 0, "folds look like a partition; the split source changed"
 
 
+# ---------------------------------------------------------------- generated splits
+@pytest.mark.parametrize("scheme", ["doubles", "combinations"])
+def test_generated_split_is_deterministic(scheme):
+    """Same seed, same folds - it is recomputed on every load, never cached."""
+    base = config_module.load(["split.source=generated",
+                               f"split.generate_scheme={scheme}"])
+    first = splits.folds(base)
+    second = splits.folds(base)
+    for a, b in zip(first, second):
+        assert list(a["test"]) == list(b["test"])
+        assert list(a["train"]) == list(b["train"])
+
+
+def test_generated_split_moves_with_the_seed():
+    base = config_module.load(["split.source=generated"])
+    if not os.path.exists(base["data"]["cache_h5ad"]):
+        pytest.skip("cache not built")
+    other = config_module.load(["split.source=generated", "split.generate_seed=7"])
+    assert splits.folds(base)[0]["test"] != splits.folds(other)[0]["test"]
+
+
+def test_generated_combinations_holds_out_the_constituent_singles():
+    """The scheme that makes the additive baselines uncomputable must actually do it."""
+    config = config_module.load(["split.source=generated",
+                                 "split.generate_scheme=combinations"])
+    if not os.path.exists(config["data"]["cache_h5ad"]):
+        pytest.skip("cache not built")
+    for i, fold in enumerate(splits.folds(config)):
+        genes = {g for pair in fold["test_doubles"] for g in pair.split("+")}
+        assert set(fold["held_out_genes"]) == genes, f"fold {i}"
+        assert set(fold["held_out_singles"]) <= set(fold["test"]), f"fold {i}"
+        assert not set(fold["held_out_singles"]) & set(fold["train"]), f"fold {i}"
+
+
+def test_generated_split_never_shares_a_condition():
+    for scheme in ("doubles", "combinations"):
+        config = config_module.load(["split.source=generated",
+                                     f"split.generate_scheme={scheme}"])
+        if not os.path.exists(config["data"]["cache_h5ad"]):
+            pytest.skip("cache not built")
+        for i, fold in enumerate(splits.folds(config)):
+            assert not set(fold["train"]) & set(fold["test"]), f"{scheme} fold {i}"
+
+
 # ---------------------------------------------------------------- data agreement
 def test_every_split_condition_exists_in_the_data(config):
     """A condition named by the split but absent from the cache is silently dropped."""

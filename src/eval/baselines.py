@@ -22,17 +22,21 @@ from __future__ import annotations
 
 import numpy as np
 
-CONTROL = "ctrl"
+from ..data.conventions import DEFAULT, ConditionNaming
+
+CONTROL = DEFAULT.control  # legacy alias; prefer stats.naming.control
 
 
-def condition_genes(condition: str) -> list[str]:
-    return [g for g in condition.split("+") if g != CONTROL]
+def condition_genes(condition: str, naming: ConditionNaming = DEFAULT) -> list[str]:
+    return naming.genes(condition)
 
 
 class ConditionMeans:
     """Per-condition mean, variance and cell count over a fixed gene space."""
 
-    def __init__(self, x: np.ndarray, conditions: np.ndarray):
+    def __init__(self, x: np.ndarray, conditions: np.ndarray,
+                 naming: ConditionNaming = DEFAULT):
+        self.naming = naming
         self.mean: dict[str, np.ndarray] = {}
         self.var: dict[str, np.ndarray] = {}
         self.n: dict[str, int] = {}
@@ -41,7 +45,11 @@ class ConditionMeans:
             self.mean[condition] = block.mean(axis=0)
             self.var[condition] = block.var(axis=0)
             self.n[condition] = int(block.shape[0])
-        self.control = self.mean[CONTROL]
+        control = next((c for c in self.mean if naming.is_control(c)), None)
+        if control is None:
+            raise ValueError(f"no control condition found; expected {naming.control!r}")
+        self.control_condition = control
+        self.control = self.mean[control]
 
     def delta(self, condition: str) -> np.ndarray:
         return self.mean[condition] - self.control
@@ -49,9 +57,16 @@ class ConditionMeans:
     def has(self, condition: str) -> bool:
         return condition in self.mean
 
+    def single_of(self, gene: str) -> str:
+        """The single condition for `gene` as this dataset actually spells it."""
+        for form in self.naming.single_forms(gene):
+            if form in self.mean:
+                return form
+        return self.naming.single(gene)
 
-def _single(gene: str) -> str:
-    return f"{gene}+{CONTROL}"
+
+def _single(gene: str, naming: ConditionNaming = DEFAULT) -> str:
+    return naming.single(gene)
 
 
 def fit_per_gene_scale(stats: ConditionMeans, train_doubles: list[str],
@@ -63,11 +78,11 @@ def fit_per_gene_scale(stats: ConditionMeans, train_doubles: list[str],
     numerator = None
     denominator = None
     for double in train_doubles:
-        a, b = condition_genes(double)
-        if not all(c in available and stats.has(c)
-                   for c in (double, _single(a), _single(b))):
+        a, b = stats.naming.genes(double)
+        sa, sb = stats.single_of(a), stats.single_of(b)
+        if not all(c in available and stats.has(c) for c in (double, sa, sb)):
             continue
-        additive = stats.delta(_single(a)) + stats.delta(_single(b))
+        additive = stats.delta(sa) + stats.delta(sb)
         target = stats.delta(double)
         numerator = additive * target if numerator is None else numerator + additive * target
         denominator = additive ** 2 if denominator is None else denominator + additive ** 2
@@ -130,11 +145,11 @@ def fit_pairwise_ridge(stats: ConditionMeans, train_doubles: list[str],
     sums = np.zeros(5)  # placeholder shape, replaced on first double
     accumulated = None
     for double in train_doubles:
-        a, b = condition_genes(double)
-        if not all(c in available and stats.has(c)
-                   for c in (double, _single(a), _single(b))):
+        a, b = stats.naming.genes(double)
+        sa, sb = stats.single_of(a), stats.single_of(b)
+        if not all(c in available and stats.has(c) for c in (double, sa, sb)):
             continue
-        da, db = stats.delta(_single(a)), stats.delta(_single(b))
+        da, db = stats.delta(sa), stats.delta(sb)
         f1, f2 = da + db, da * db
         y = stats.delta(double)
         block = np.stack([f1 * f1, f1 * f2, f2 * f2, f1 * y, f2 * y])
@@ -165,8 +180,8 @@ def predict(name: str, double: str, stats: ConditionMeans,
     held out, so reading them would leak exactly the information the split was
     built to withhold.
     """
-    a, b = condition_genes(double)
-    single_a, single_b = _single(a), _single(b)
+    a, b = stats.naming.genes(double)
+    single_a, single_b = stats.single_of(a), stats.single_of(b)
     readable = lambda c: c in available and stats.has(c)  # noqa: E731
 
     if name == "control":
@@ -203,7 +218,7 @@ def training_conditions(stats: ConditionMeans, fold: dict, method: str) -> list[
     combinations : the fold's own train list, which already excludes the
                    held-out singles.
     """
-    singles = [c for c in stats.mean if c.endswith(f"+{CONTROL}")]
+    singles = [c for c in stats.mean if stats.naming.is_single(c)]
     if method == "combinations":
         # Every single EXCEPT the held-out ones. Those are the whole point of the
         # split, so reading them would leak; the rest stay available.

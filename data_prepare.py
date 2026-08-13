@@ -25,6 +25,9 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+
+from src import config as config_module  # noqa: E402
 
 
 def run(label: str, argv: list[str]) -> None:
@@ -55,10 +58,18 @@ def main() -> None:
         ["scripts/build_data.py", "--validate-only", *overrides])
 
     run("3/4  modelled-space cache",
-        ["scripts/build_data.py", *(["--force"] if args.force else []), *overrides])
+        ["scripts/build_data.py", "--skip-validation",
+         *(["--force"] if args.force else []), *overrides])
 
     if not args.skip_baselines:
-        for method in ("additive", "combinations"):
+        # `method` selects between the additive and combinations derivations of
+        # the shipped split. Other sources define their own folds and ignore it,
+        # so running both would print the same table twice.
+        config = config_module.load(args.overrides)
+        methods = (("additive", "combinations")
+                   if config["split"].get("source", "reference_pkl") == "reference_pkl"
+                   else (config["split"]["method"],))
+        for method in methods:
             run(f"4/4  baselines ({method})",
                 ["scripts/run_baselines.py", "--set", f"split.method={method}",
                  *args.overrides])

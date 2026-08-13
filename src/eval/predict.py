@@ -62,16 +62,16 @@ def evaluate_model(vae, field, data, stats, folds, method, config,
     device = config["train"]["device"]
     n_gen = config["eval"]["n_gen_cells"]
     n_steps = config["train"]["n_integration_steps"]
-    control_cells = data.cells("ctrl")
+    control_cells = data.cells(data.control_condition)
 
     numerator, denominator = 0.0, 0.0
     edists, de20s, per_double, floors = [], [], [], []
 
     for fold in folds:
-        test_doubles = [c for c in fold["test"] if len(condition_genes(c)) == 2]
+        test_doubles = [c for c in fold["test"] if data.naming.is_double(c)]
         for double in test_doubles:
-            a, b = condition_genes(double)
-            single_a, single_b = f"{a}+ctrl", f"{b}+ctrl"
+            a, b = data.naming.genes(double)
+            single_a, single_b = stats.single_of(a), stats.single_of(b)
             if not all(stats.has(c) for c in (double, single_a, single_b)):
                 continue
 
@@ -85,7 +85,8 @@ def evaluate_model(vae, field, data, stats, folds, method, config,
             m_ab, m_a = stats.mean[double], stats.mean[single_a]
             m_b, m_ctrl = stats.mean[single_b], stats.control
             e_noise = sum(float((stats.var[c] / max(stats.n[c], 1)).sum())
-                          for c in (double, single_a, single_b, baseline_module.CONTROL))
+                          for c in (double, single_a, single_b,
+                                    stats.control_condition))
 
             r = metrics.residual(m_ab, m_a, m_b, m_ctrl)
             r_hat = metrics.residual(m_hat, m_a, m_b, m_ctrl)

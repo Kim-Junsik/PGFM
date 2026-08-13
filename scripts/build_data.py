@@ -23,6 +23,21 @@ from src import config as config_module
 from src.data import io, preprocess, splits
 
 
+def _print_report(report: dict, config: dict) -> None:
+    print(f"  reference folds are clean          : {report['reference_ok']}")
+    print(f"  combinations derived from them     : {report['combinations_derived']}")
+    print(f"  folds                              : {report['n_folds']}")
+    print(f"  additive (train, test) per fold    : {report['additive_sizes']}")
+    print(f"  combinations (doubles, held-out)   : {report['combinations_sizes']}")
+    lo, hi = report["additive_test_pairwise_overlap"]
+    print(f"  pairwise test overlap across folds : {lo}-{hi} conditions "
+          f"(non-zero confirms independent draws, not a partition)")
+    print(f"  doubles that are train in ALL folds: {report['doubles_train_in_every_fold']}")
+    excluded = splits.held_out_conditions(config)
+    print(f"  held out by ANY fold of ANY method : {len(excluded)} conditions "
+          f"(exclusion set for leak-free work)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -32,6 +47,8 @@ def main() -> None:
                         help="check the splits and exit without touching the matrix")
     parser.add_argument("--force", action="store_true",
                         help="rebuild the cache even if it already exists")
+    parser.add_argument("--skip-validation", action="store_true",
+                        help="the caller already validated; do not print it twice")
     args = parser.parse_args()
 
     config = config_module.load(args.overrides)
@@ -39,20 +56,13 @@ def main() -> None:
     cache_path = config["data"]["cache_h5ad"]
 
     # ---------------------------------------------------------------- splits
-    print("=== 1. split validation ===")
-    report = splits.validate(config)
-    print(f"  reference folds are clean          : {report['reference_ok']}")
-    print(f"  combinations derived from them     : {report['combinations_derived']}")
-    print(f"  folds                              : {report['n_folds']}")
-    print(f"  additive (train, test) per fold    : {report['additive_sizes']}")
-    print(f"  combinations (doubles, held-out)   : {report['combinations_sizes']}")
-    lo, hi = report["additive_test_pairwise_overlap"]
-    print(f"  pairwise test overlap across folds : {lo}-{hi} conditions "
-          f"(non-zero confirms 5 independent draws, not a partition)")
-    print(f"  doubles that are train in ALL folds: {report['doubles_train_in_every_fold']}")
-    excluded = splits.held_out_conditions(config)
-    print(f"  held out by ANY fold of ANY method : {len(excluded)} conditions "
-          f"(exclusion set for leak-free work)")
+    if args.skip_validation and not args.validate_only:
+        report = None
+    else:
+        print("=== 1. split validation ===")
+        report = splits.validate(config)
+    if report is not None:
+        _print_report(report, config)
 
     if args.validate_only:
         return
@@ -88,10 +98,22 @@ def main() -> None:
     print(f"  done in {time.time() - started:.1f}s  "
           f"shape={matrix.shape}  nnz={matrix.nnz:,}  density={matrix.nnz / np.prod(matrix.shape) * 100:.2f}%")
 
+    # Carry over any obs column the split depends on. Without this the cache
+    # loses obs['split'] / the group column, and every later load falls back to
+    # the raw file or fails outright.
+    obs_frame = {"condition": pd.Categorical(conditions)}
+    for key in {config["split"].get("obs_key"), config["split"].get("group_key")}:
+        if not key or key == "condition":
+            continue
+        try:
+            obs_frame[key] = pd.Categorical(io.read_obs_column(raw_path, key))
+            print(f"  carried over obs[{key!r}] for the split")
+        except KeyError:
+            pass
+
     adata = ad.AnnData(
         X=matrix,
-        obs=pd.DataFrame({"condition": pd.Categorical(conditions)},
-                         index=io.read_obs_column(raw_path, "_index")),
+        obs=pd.DataFrame(obs_frame, index=io.read_obs_column(raw_path, "_index")),
         var=pd.DataFrame(index=pd.Index(var_names[gene_indices], name=None)),
     )
     adata.uns["build_config"] = json.dumps(config)

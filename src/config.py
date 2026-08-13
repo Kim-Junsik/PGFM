@@ -27,7 +27,11 @@ DEFAULTS: dict[str, Any] = {
         "n_hvg": 3000,  # null selects every gene
         "hvg_criterion": "raw_variance",  # raw_variance | dispersion
         "force_include_targets": True,
+        # Condition naming. Norman writes 'AHR+FEV' / 'AHR+ctrl' / 'ctrl';
+        # other datasets use 'control' or 'DMSO'. Read through
+        # src/data/conventions.py, never hardcoded.
         "control_label": "ctrl",
+        "condition_separator": "+",
         "chunk_size": 10000,
     },
     "split": {
@@ -36,7 +40,20 @@ DEFAULTS: dict[str, Any] = {
         # byte-identical to this file. The combinations folds are a deterministic
         # function of the additive ones and are derived at load time rather than
         # cached, so no split artifact can drift out of sync with its source.
+        # reference_pkl: the file that ships with the dataset (Norman).
+        # obs_column:    a column of the cache's obs, for datasets that carry
+        #                their split per cell instead (combosciplex).
+        # generated:     make one deterministically from a seed, for a dataset
+        #                that ships no split at all. Nothing is written to disk.
+        "source": "reference_pkl",  # reference_pkl | obs_column | generated
         "reference_pkl": "data/norman/split_results.pkl",
+        "obs_key": "split",
+        "obs_test_value": "test",
+        "generate_scheme": "combinations",  # doubles | combinations | group
+        "generate_seed": 0,
+        "generate_test_fraction": 0.3,
+        "n_folds": 5,
+        "group_key": "cell_type",  # for generate_scheme=group
         "method": "additive",  # additive | combinations
         "fold": 0,
     },

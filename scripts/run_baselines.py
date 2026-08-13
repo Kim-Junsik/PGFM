@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src import config as config_module
 from src.data import splits
+from src.data.conventions import ConditionNaming
 from src.eval import baselines, metrics
 
 BASELINES = ["control", "additive", "per_gene_scaled", "ridge_additive", "pairwise_ridge"]
@@ -36,7 +37,7 @@ def noise_floor_for(stats: baselines.ConditionMeans, double: str,
     lambda = 1.000 across n_eff 16-375), so no empirical correction is applied.
     """
     total = 0.0
-    for condition in (double, single_a, single_b, baselines.CONTROL):
+    for condition in (double, single_a, single_b, stats.control_condition):
         total += float((stats.var[condition] / max(stats.n[condition], 1)).sum())
     return total
 
@@ -44,11 +45,11 @@ def noise_floor_for(stats: baselines.ConditionMeans, double: str,
 def evaluate(config: dict, x: np.ndarray, conditions: np.ndarray,
              stats: baselines.ConditionMeans, folds: list[dict], method: str,
              rng: np.random.Generator) -> dict:
-    control_cells = x[conditions == baselines.CONTROL]
+    control_cells = x[conditions == stats.control_condition]
     n_gen = config["eval"]["n_gen_cells"]
     power = config["eval"]["edist_power"]
     device = config["eval"]["device"]
-    perturbations = sorted({g for c in stats.mean for g in baselines.condition_genes(c)})
+    perturbations = sorted({g for c in stats.mean for g in stats.naming.genes(c)})
 
     accumulators = {
         name: {"num": 0.0, "den": 0.0, "edist": [], "de20": [], "per_double": [], "skipped": 0}
@@ -58,7 +59,7 @@ def evaluate(config: dict, x: np.ndarray, conditions: np.ndarray,
     for fold_index, fold in enumerate(folds):
         train_conditions = baselines.training_conditions(stats, fold, method)
         available = set(train_conditions)
-        train_doubles = [c for c in fold["train"] if len(baselines.condition_genes(c)) == 2]
+        train_doubles = [c for c in fold["train"] if stats.naming.is_double(c)]
         scale = baselines.fit_per_gene_scale(stats, train_doubles, available)
         ridge = baselines.fit_ridge_additive(
             stats, train_conditions, perturbations,
@@ -67,10 +68,10 @@ def evaluate(config: dict, x: np.ndarray, conditions: np.ndarray,
         pairwise = baselines.fit_pairwise_ridge(
             stats, train_doubles, available, alpha=config["eval"]["ridge_alpha"])
 
-        test_doubles = [c for c in fold["test"] if len(baselines.condition_genes(c)) == 2]
+        test_doubles = [c for c in fold["test"] if stats.naming.is_double(c)]
         for double in test_doubles:
-            a, b = baselines.condition_genes(double)
-            single_a, single_b = f"{a}+ctrl", f"{b}+ctrl"
+            a, b = stats.naming.genes(double)
+            single_a, single_b = stats.single_of(a), stats.single_of(b)
             if not all(stats.has(c) for c in (double, single_a, single_b)):
                 continue
 
@@ -135,7 +136,8 @@ def main() -> None:
     print(f"  {x.shape[0]:,} cells x {x.shape[1]:,} genes (modelled space)")
 
     started = time.time()
-    stats = baselines.ConditionMeans(x, conditions)
+    naming = ConditionNaming.from_config(config)
+    stats = baselines.ConditionMeans(x, conditions, naming)
     folds = splits.folds(config, method)
     rng = np.random.default_rng(config["eval"]["seed"])
 

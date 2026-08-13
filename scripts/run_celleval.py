@@ -25,6 +25,7 @@ import torch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.data import splits
+from src.data.conventions import ConditionNaming
 from src.data.dataset import PerturbationData
 from src.eval.celleval import CONTROL_LABEL, PERT_COL, export
 from src.models.backbones import build_backbone
@@ -91,7 +92,8 @@ def main() -> None:
         device = config["train"]["device"] = config["eval"]["device"] = "cpu"
 
     print(f"loading data ({config['data']['cache_h5ad']}) ...")
-    data = PerturbationData(config["data"]["cache_h5ad"])
+    data = PerturbationData(config["data"]["cache_h5ad"],
+                            naming=ConditionNaming.from_config(config))
     method = config["split"]["method"]
     fold = splits.folds(config, method)[config["split"]["fold"]]
 

@@ -1,7 +1,11 @@
 # --- data (4.1GB, never commit) ---
 # data/norman/split_results.pkl ships with the dataset and IS the split source of
 # truth; there is deliberately no copy of it under version control.
-data/
+#
+# The leading slash matters: a bare "data/" also matches src/data/, which
+# silently kept the entire data layer (io, splits, dataset, preprocess, kegg,
+# counts, conventions) out of the first push.
+/data/
 *.h5ad
 *.zip
 

@@ -20,7 +20,7 @@
 
 ```
 코드          2,900+ 줄  (src/ 22개 · scripts/ 6개 · tests/ 1개)
-테스트        28개 통과   (구조 보장 14 + split 동일성 14)
+테스트        33개 통과   (구조 보장 14 + split 19)
 백본          4종 모두 end-to-end 실행 확인
 목표선        미달
 ```
@@ -30,7 +30,7 @@
 | 데이터 · split · 평가 · 기준선 | 완료, 검증됨 |
 | 백본 4종 (mlp / transformer / scvi / pcab) | 완료, 1에폭 실행 확인 |
 | LieCFM 동역학 + 구조 보장 4가지 | 완료, 14개 테스트 |
-| split 동일성 계약 | 완료, 14개 테스트 |
+| split 동일성 계약 + 생성기 | 완료, 19개 테스트 |
 | P-CAB / E-RCA | 완료, 최적화됨 (fwd+bwd 84 → 31 ms) |
 | cell-eval 어댑터 | 작성 완료, **첫 실행 검증 미완** |
 | 인코더 / 디코더 독립 축 분리 | 미착수 (선택) |
@@ -130,12 +130,15 @@ combinations derived from them     : True
 
 ## 1. `train.sh` — 학습
 
+학습 명령은 하나다. 아래는 같은 명령의 변형이지 별도의 단계가 아니다.
+
 ```bash
-sh train.sh                                      # 기본값
+sh train.sh                                      # 모델 1개. 이것이 전부
 sh train.sh --tag run1 model.backbone=pcab       # 이름 붙인 run + 설정 변경
 sh train.sh model.interaction=additive split.method=combinations
 sh train.sh train.stage1_epochs=60 train.stage2_epochs=80
-sh train.sh --ablation                           # 2단계 판정 6개 sweep
+sh train.sh --ablation                           # 같은 명령을 6번 (sweep)
+sh train.sh --ablation model.backbone=pcab       # 다른 백본으로 같은 sweep
 ```
 
 `key.path=value` 로 모든 설정을 덮어쓴다. **없는 키를 쓰면 즉시 예외**가 난다 —
@@ -145,7 +148,12 @@ sh train.sh --ablation                           # 2단계 판정 6개 sweep
 
 ### `--ablation` — 가장 먼저 할 일
 
-`generator` 2종 × `interaction` 3종 = 6개를 순차 실행한다. 판정 순서:
+`generator` 2종 × `interaction` 3종 = 6개를 순차 실행한다. **백본은 건드리지 않는다** —
+`model.backbone` 은 인코더/디코더를, `generator`/`interaction` 은 잠재 동역학을 정하는
+별개의 축이고, 둘을 같이 바꾸면 이득이 어느 쪽에서 왔는지 구분할 수 없다.
+
+실행 이름에 백본이 들어가므로(`s2_mlp_*`, `s2_pcab_*`) 백본을 바꿔 다시 돌려도
+이전 결과를 덮어쓰지 않는다. 판정 순서:
 
 1. `commutator` vs `additive` — Lie 괄호가 기여하는가
 2. `commutator` vs `free_mlp` — 대수적 형태가 자유 MLP 보다 나은가
@@ -222,7 +230,7 @@ verify_fix                mlp       neural_field  commutator    -0.8789  0.5950 
 python -m pytest tests/ -q
 ```
 
-28개가 통과해야 한다. 정확도 테스트가 아니다 — **실패는 학습 부족이 아니라 계약 위반**을
+33개가 통과해야 한다. 정확도 테스트가 아니다 — **실패는 학습 부족이 아니라 계약 위반**을
 뜻한다.
 
 ### `tests/test_structure.py` (14개) — 학습 없이 성립해야 하는 성질
@@ -231,7 +239,7 @@ python -m pytest tests/ -q
 `Λ=0 → Σu_a`, 순열 불변, 괄호 반대칭, 그리고 jvp 교환자가 명시적 야코비안과 1e-8 까지
 일치하는지. 실패하면 속도장 합성이 틀린 것이다.
 
-### `tests/test_splits.py` (14개) — split 동일성
+### `tests/test_splits.py` (19개) — split 동일성과 생성기
 
 split 이 `data/norman/split_results.pkl` 과 **같은 리스트, 같은 순서**인지 확인한다.
 "동등" 이 아니라 축자 일치다. 유전자 공간은 자유롭게 바꿔도 되지만(n_hvg 1000 / 3000 /
@@ -246,6 +254,195 @@ split 자체가 맞아도 **거기서 파생되는 train 집합**은 따로 깨�
 combinations 의 train 이 double 110 → 88 로, single 78 → 0 으로 줄어든 적이 있고,
 ridge-additive 목표선이 0.1853 에서 0.0487 로 **낮아져 있었다** — 즉 넘기 쉬워졌는데
 아무것도 이상해 보이지 않았다. 그래서 개수까지 못박는 테스트가 두 개 더 있다.
+
+
+## 4. 새 데이터로 학습하기
+
+필요한 것은 h5ad 하나와 설정 몇 줄이다. 코드를 고칠 일은 없다.
+
+### 데이터에 요구되는 것
+
+| 항목 | 요구 |
+|---|---|
+| `X` | log1p 정규화된 발현 행렬 (raw count 면 먼저 정규화할 것 — 파이프라인은 정규화하지 않는다) |
+| `obs['condition']` | 조건 이름. 기본 형식은 `A+B` / `A+ctrl` / `ctrl` |
+| `var_names` | 유전자 심볼. P-CAB 마스크가 KEGG 와 심볼로 매칭한다 |
+
+### 조건 이름이 다를 때
+
+```bash
+--set data.control_label=control data.condition_separator=+
+```
+
+`ctrl` 은 하드코딩이 아니라 설정이다(`src/data/conventions.py`). 대조군을 찾지 못하면
+평가 도중이 아니라 **로드 시점에 명확한 예외**가 난다.
+
+### split — 세 가지 출처
+
+**① 데이터셋이 pkl 로 제공** (Norman)
+
+```bash
+--set split.source=reference_pkl split.reference_pkl=data/newset/splits.pkl
+```
+
+**② 세포마다 obs 에 들어 있음** (combosciplex)
+
+```bash
+--set split.source=obs_column split.obs_key=split split.obs_test_value=test
+```
+
+한 조건의 세포가 여러 값에 걸치면 다수결로 배정한다. 그러지 않으면 같은 조건이
+train 과 test 양쪽에 들어간다.
+
+**③ split 이 아예 없음 — 시드에서 생성**
+
+```bash
+--set split.source=generated split.generate_scheme=combinations split.generate_seed=0
+```
+
+| `generate_scheme` | 홀드아웃 | 용도 |
+|---|---|---|
+| `doubles` | double 의 일부 | 조합 일반화. single 은 남으므로 가법 기준선 계산 가능 |
+| `combinations` | double + **그 구성 single 까지** | 더 어렵다. 가법 기준선이 계산 불가가 되는 것이 요점 |
+| `group` | obs 컬럼이 지정한 **그룹 통째로** | **cell line / donor / batch 일반화** |
+
+생성된 split 은 **디스크에 쓰지 않는다.** 매 로드마다 시드에서 재계산한다 — 파일로
+저장하면 그 파일이 시드와 어긋나도 아무도 모르기 때문이다. 또한 `default_rng` 가 아니라
+legacy `RandomState` 를 쓴다. numpy 는 `default_rng` 의 스트림을 버전 간 보장하지 않고,
+numpy 를 올렸을 때 split 이 조용히 바뀌면 그 split 으로 측정한 모든 수치가 무효가 된다.
+
+### cell line 데이터
+
+조합 일반화와 **다른 축**이다. 둘 다 보려면 따로 돌려서 비교한다.
+
+```bash
+python data_prepare.py --set   data.raw_h5ad=data/newset/new.h5ad   data.cache_h5ad=assets/new_modeled.h5ad   split.source=generated split.generate_scheme=group split.group_key=cell_type
+
+sh train.sh data.cache_h5ad=assets/new_modeled.h5ad   split.source=generated split.generate_scheme=group split.group_key=cell_type
+```
+
+`split.group_key` 가 obs 에 없으면 어느 컬럼을 지정해야 하는지 알려주는 예외가 난다.
+
+### 유전자 섭동이 아닐 때 (약물 등)
+
+```bash
+--set data.force_include_targets=false
+```
+
+강제 포함은 "섭동 표적이 var_names 의 유전자" 라는 전제 위에 있다. 약물 이름은
+유전자가 아니므로 넣을 것이 없다. combosciplex 에서 실측: 섭동 이름 중 var_names 에
+존재하는 것이 **0개**다.
+
+같은 이유로 P-CAB 의 "섭동이 패스웨이 토큰과 정렬된다" 는 이야기도 성립하지 않는다.
+그 데이터가 약물–패스웨이 대응을 obs 에 들고 있다면(combosciplex 의 `pathway1` /
+`pathway2`) 그쪽을 쓰는 편이 낫다.
+
+### 조합 벤치마크가 될 수 있는지 먼저 확인할 것
+
+double 의 구성 single 이 데이터에 없으면 가법 기준선을 계산할 수 없고, 그러면
+`resid_R2` 로 판정할 수가 없다. combosciplex 는 double 25개 중 **7개만** 구성 single
+을 가지고 있어 조합 벤치마크로 쓸 수 없다 — 분포 이동 테스트로만 쓴다.
+
+`python data_prepare.py` 의 기준선 단계에서 `skip` 열을 보면 바로 드러난다.
+
+
+## 5. 두 데이터셋 — 실행 명령어 전체
+
+그대로 복사해 쓰면 된다. Norman 이 기본값이므로 설정을 주지 않고,
+combosciplex 는 매번 설정 세 개를 붙인다.
+
+### Norman — 조합 일반화 (주 데이터)
+
+```bash
+# 0. 데이터 준비 (한 번)
+python data_prepare.py
+
+# 1. 2단계 판정 — 여기부터 시작한다
+sh train.sh --ablation
+sh test.sh --summary
+
+# 2. 1번을 통과했다면 2x2 를 완성한다
+sh train.sh --ablation model.backbone=pcab
+sh test.sh --summary
+
+# 3. 백본 비교
+sh train.sh --tag nm_mlp         model.backbone=mlp
+sh train.sh --tag nm_transformer model.backbone=transformer train.batch_size=64
+sh train.sh --tag nm_scvi        model.backbone=scvi model.decoder_head=zinb
+sh train.sh --tag nm_pcab        model.backbone=pcab train.batch_size=32
+sh test.sh --summary
+
+# 4. 대조군
+sh train.sh --tag nm_mse       model.decoder_head=mse
+sh train.sh --tag nm_softgate  model.hurdle_gate=soft
+sh train.sh --tag nm_maskadd   model.backbone=pcab model.mask_combine=logit_bias
+sh train.sh --tag nm_masksig   model.backbone=pcab model.mask_activation=sigmoid
+sh train.sh --tag nm_maskfree  model.backbone=pcab model.mask_mode=residual_only
+sh train.sh --tag nm_randcpl   train.coupling=random
+
+# 5. combinations split
+sh train.sh --ablation split.method=combinations
+sh test.sh --summary
+
+# 6. 외부 비교
+sh test.sh results/runs/nm_pcab --celleval
+```
+
+### combosciplex — 분포 이동 (보조 데이터)
+
+```bash
+# 0. 데이터 준비 (한 번)
+python data_prepare.py --set   data.raw_h5ad=data/combosciplex/combosciplex.h5ad   data.cache_h5ad=assets/combosciplex_modeled.h5ad   data.control_label=control   data.force_include_targets=false   split.source=obs_column split.obs_test_value=ood
+
+# 1. 학습 — 설정 세 개를 매번 붙인다
+sh train.sh --ablation   data.cache_h5ad=assets/combosciplex_modeled.h5ad   data.control_label=control   split.source=obs_column split.obs_test_value=ood
+sh test.sh --summary
+
+# 2. 백본 비교
+sh train.sh --tag cb_mlp   data.cache_h5ad=assets/combosciplex_modeled.h5ad data.control_label=control   split.source=obs_column split.obs_test_value=ood
+
+sh train.sh --tag cb_pcab model.backbone=pcab train.batch_size=32   data.cache_h5ad=assets/combosciplex_modeled.h5ad data.control_label=control   split.source=obs_column split.obs_test_value=ood
+sh test.sh --summary
+```
+
+| combosciplex 설정 | 이유 |
+|---|---|
+| `data.control_label=control` | 대조군이 `control+control` 이고 single 은 `control+Drug` 로 쓴다 |
+| `data.force_include_targets=false` | 섭동이 약물이라 var_names 에 없다 — 실측 **0 / 17** |
+| `split.source=obs_column` | split pkl 이 없고 `obs['split']` 에 들어 있다 |
+| `split.obs_test_value=ood` | `test` 는 조건 안에서 세포를 나눈 것이라 조건 단위 홀드아웃이 아니다 |
+
+### 두 데이터셋의 차이
+
+| | Norman | combosciplex |
+|---|---|---|
+| 크기 | 84,986 × 19,264 | 63,378 × 27,518 |
+| 섭동 | 유전자 (CRISPRa) | 약물 |
+| single / double | 101 / 125 | 6 / 25 |
+| 구성 single 을 가진 double | **125 / 125** | **7 / 25** |
+| 평가 가능한 test double | 37 (fold 당) | **3** |
+| 쓸 수 있는 주장 | **조합 일반화** | **분포 이동 일반화** |
+
+마지막 두 줄이 핵심이다. combosciplex 의 ood 에서 구성 single 까지 갖춘 double 은 **3개**뿐이라
+`resid_R2` 로 통계적 주장을 할 수 없다. 조합 일반화는 Norman 으로 하고, combosciplex 는
+"다른 modality 에서도 동역학이 작동한다" 에만 쓴다.
+
+### 순서가 중요하다
+
+1번이 실패하면 2~6번은 의미가 없다. 기여 ① (Lie 괄호) 이 없으면 논문은 "패스웨이 인코더
+하나" 가 되고, 그것만으로는 약하다. `--ablation` 은 백본을 이름에 넣으므로
+(`s2_mlp_*`, `s2_pcab_*`) 두 sweep 이 서로를 덮어쓰지 않는다.
+
+2번이 필요한 이유는 리뷰어가 **"pcab 위에서도 Lie 괄호가 여전히 도움이 되는가"** 를
+묻기 때문이다. mlp 에서만 보였다면 두 기여가 서로를 대체하지 않는다는 말을 할 수 없다.
+
+| | `additive` | `commutator` |
+|---|---|---|
+| **mlp** | A | B |
+| **pcab** | C | D |
+
+`B > A` 이고 `D > C` 여야 한다. `D ≈ C` 라면 pcab 을 쓰는 순간 괄호가 무의미해진다는
+뜻이고, 기여 ① 이 ② 에 흡수되어 논문은 사실상 기여 하나짜리가 된다.
 
 ## 알아두면 좋은 함정
 
