@@ -155,7 +155,11 @@ def main() -> None:
     print(f"\nelapsed {time.time() - started:.1f}s")
 
     os.makedirs("results", exist_ok=True)
-    out = f"results/baselines_{method}.json"
+    # The dataset goes in the filename. Without it a combosciplex run overwrites
+    # the Norman baselines under the same name, and the summary then shows the
+    # wrong target line - a bar that looks passed when it was not.
+    dataset = os.path.splitext(os.path.basename(config["data"]["cache_h5ad"]))[0]
+    out = f"results/baselines_{dataset}_{method}.json"
     with open(out, "w") as handle:
         json.dump({"config": config, "results": results}, handle, indent=2)
     print(f"-> {out}")

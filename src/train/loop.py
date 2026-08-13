@@ -78,7 +78,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
                  config: dict, device: str, rng: np.random.Generator, log) -> None:
     train_cfg = config["train"]
     parameters = list(field.parameters())
-    if train_cfg["finetune_encoder_in_stage2"]:
+    if train_cfg["finetune_vae_in_stage2"]:
         parameters += list(vae.parameters())
     optimiser = torch.optim.AdamW(parameters, lr=train_cfg["lr"],
                                   weight_decay=train_cfg["weight_decay"])
@@ -90,14 +90,16 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
 
     for epoch in range(train_cfg["stage2_epochs"]):
         if train_cfg["latent_renorm_every"] and epoch and                 epoch % train_cfg["latent_renorm_every"] == 0:
-            # The encoder keeps moving when it is fine-tuned, so the statistics
-            # taken after stage 1 go stale; refresh them on a schedule.
+            # Refreshing stale statistics, at the cost of moving the coordinate
+            # system the field was trained in. Off by default - see config.
             vae.fit_latent_scale(_to_device(data.x[scale_rows], device))
+            log(f"  [warn] latent renormalised at epoch {epoch + 1}; the field "
+                f"was fitted in the previous coordinates")
         singles_only = epoch < train_cfg["single_warmup_epochs"]
         conditions = sampler.epoch(singles_only=singles_only)
         if train_cfg["max_steps_per_epoch"]:
             conditions = conditions[:train_cfg["max_steps_per_epoch"]]
-        vae.train(train_cfg["finetune_encoder_in_stage2"])
+        vae.train(train_cfg["finetune_vae_in_stage2"])
         field.train()
 
         total, total_match, count = 0.0, 0.0, 0
@@ -107,7 +109,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
 
             x0 = _to_device(source, device)
             x1 = _to_device(target, device)
-            if train_cfg["finetune_encoder_in_stage2"]:
+            if train_cfg["finetune_vae_in_stage2"]:
                 z0, _ = vae.encode_z(x0)
                 z1, _ = vae.encode_z(x1)
             else:
@@ -117,9 +119,15 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
 
             z0p, z1p = sample_pairs(z0, z1, train_cfg["coupling"], train_cfg["uot_reg"],
                                     train_cfg["uot_reg_marginal"], rng)
-            t = torch.rand(1, device=device)
+            # One t PER SAMPLE. Drawing a single scalar for the whole batch gives
+            # the time axis one sample per step instead of `batch_size`, so [0, 1]
+            # is covered sparsely and the gradient is far noisier. Inference then
+            # integrates through 20 RK4 times, passing through regions the field
+            # barely saw, and the error accumulates as a displacement that is too
+            # small - the measured prediction was 72 % of the true delta.
+            t = torch.rand(z0p.shape[0], 1, device=device)
             z_t = (1.0 - t) * z0p + t * z1p
-            predicted = field(z_t, t, perturbations)
+            predicted = field(z_t, t.reshape(-1), perturbations)
             matching = torch.nn.functional.mse_loss(predicted, z1p - z0p)
             loss = matching
 
@@ -128,7 +136,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
             # scores perfectly. Measured before this term was added: ||z1 - z0||
             # fell to 0.019 while ||z0|| stayed ~8, and no transport happened at
             # all. Keeping the reconstruction objective on removes that escape.
-            if train_cfg["finetune_encoder_in_stage2"]:
+            if train_cfg["finetune_vae_in_stage2"]:
                 params0 = vae.decode_z(z0)
                 recon, _ = vae.loss(params0, x0, **_aux(x0, config))
                 loss = loss + train_cfg["stage2_recon_weight"] * recon

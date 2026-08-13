@@ -14,17 +14,19 @@ set -e
 RUN=""
 SUMMARY=0
 CELLEVAL=0
+FILTER=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --summary)  SUMMARY=1; shift ;;
     --celleval) CELLEVAL=1; shift ;;
+    --filter)   FILTER="$2"; shift 2 ;;
     *)          RUN="$1"; shift ;;
   esac
 done
 
 if [ "$SUMMARY" -eq 1 ]; then
-  python scripts/summarise_runs.py
+  python scripts/summarise_runs.py ${FILTER:+--filter "$FILTER"}
   exit 0
 fi
 

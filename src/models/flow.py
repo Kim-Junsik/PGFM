@@ -38,7 +38,8 @@ class LieCFMField(nn.Module):
         if self.interaction_kind in ("none", None):  # legacy spelling
             self.interaction_kind = "additive"
         if self.interaction_kind == "commutator":
-            self.gate = AntisymmetricGate(n_perturbations, model_cfg["gate_init"])
+            self.gate = AntisymmetricGate(n_perturbations, model_cfg["gate_init"],
+                                          model_cfg["gate_rank"])
         elif self.interaction_kind == "free_mlp":
             self.free = FreeInteraction(n_perturbations, self.latent_dim)
         elif self.interaction_kind != "additive":

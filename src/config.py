@@ -99,7 +99,12 @@ DEFAULTS: dict[str, Any] = {
         "generator": "neural_field",  # affine | neural_field
         "generator_hidden": [256, 256],
         "interaction": "commutator",  # additive | commutator | free_mlp
-        "gate_init": 0.0,  # antisymmetric gate Lambda, 0 = start exactly additive
+        # Lambda = gate_scale * w_a^T J w_b. gate_init 0 starts exactly additive;
+        # gate_rank sets the size of the per-perturbation factors. A full [P, P]
+        # table would leave every unseen pair at its initial value, which is the
+        # one thing this model may not do.
+        "gate_init": 0.0,
+        "gate_rank": 16,
         "time_embed_dim": 32,
         # --- P-CAB mask (stage 3) ---
         "n_pathway_tokens": None,  # None = however many KEGG pathways survive
@@ -124,7 +129,26 @@ DEFAULTS: dict[str, Any] = {
         "lr": 1e-3,
         "weight_decay": 1e-5,
         "kl_weight": 1e-3,
-        "finetune_encoder_in_stage2": True,
+        # Whether stage 2 also trains the VAE. Named for the whole VAE, not just
+        # the encoder: the decoder is frozen with it, and stage 2 runs the VAE in
+        # eval mode so dropout is off and the latent is mu rather than a sample.
+        #
+        # Measured, against the handoff spec's recommendation to fine-tune:
+        # letting the encoder move during stage 2 shrinks the latent (||z0|| 8 ->
+        # 2.68) and therefore shrinks the flow-matching TARGET itself. fm fell to
+        # 0.0019 not because the field fitted well but because z1 - z0 had been
+        # made small, and transport under-predicted the true delta by 28 %.
+        # Freezing gives fm 1.01 and resid_R2 -0.0003 vs -0.7867, i.e. the
+        # additive structure is finally reproduced exactly as it should be.
+        # The spec's reasoning is not wrong - a latent optimal for reconstruction
+        # need not be one where generators compose well - but allowing the VAE to
+        # move opens an easier path than improving that geometry: shrink the
+        # latent, and the target shrinks with it. The stage-2 reconstruction term
+        # below mitigates the collapse without preventing it, because the scale
+        # can fall 3x while reconstruction stays fine. Freezing closes the path.
+        # To have both later, pin the latent scale structurally (running-stat
+        # normalisation inside encode_z) and fine-tuning becomes safe again.
+        "finetune_vae_in_stage2": False,
         # Weight on the reconstruction term kept alive during stage 2. Without it
         # the encoder collapses the latent, which is the global optimum of flow
         # matching on its own.
@@ -135,7 +159,14 @@ DEFAULTS: dict[str, Any] = {
         "uot_reg": 0.05,
         "uot_reg_marginal": 1.0,
         # 0 = fit the latent standardisation once before stage 2 and keep it.
-        "latent_renorm_every": 10,
+        #
+        # Do not turn this on without a reason. Refitting mid-training moves the
+        # latent coordinates, and the velocity field was learned in the old ones:
+        # measured at every refit, fm jumped 0.0087 -> 1.146 and each window came
+        # back worse than the previous one. The encoder does drift when it is
+        # fine-tuned, but the reconstruction term bounds that drift, which is the
+        # cheaper of the two problems.
+        "latent_renorm_every": 0,
         "n_integration_steps": 20,
         "grad_clip": 1.0,
         "device": "cuda",

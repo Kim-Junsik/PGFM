@@ -36,22 +36,49 @@ def lie_bracket(field_a: Callable[[torch.Tensor], torch.Tensor],
 
 
 class AntisymmetricGate(torch.nn.Module):
-    """Lambda_ab weighting the bracket, held antisymmetric by construction.
+    """Lambda_ab weighting the bracket, factorised so it is NOT indexed by a pair.
 
-    Lambda_ab * [u_a, u_b] is invariant under swapping a and b because both
-    factors flip sign, so the composed velocity does not depend on which member of
-    a pair is written first - there is no ordering convention to get wrong.
+        Lambda_ab = scale * w_a^T J w_b,     J = -J^T
+
+    The previous version stored a full [P, P] table. It trained fine and was
+    exactly wrong for this problem: measured on a finished run, |Lambda| averaged
+    0.076 over the 88 training doubles and was EXACTLY 0 over the 37 evaluation
+    doubles, because a pair never seen in training keeps its initial value. The
+    interaction term therefore vanished at evaluation and `commutator` was
+    numerically identical to `additive` on precisely the conditions the paper is
+    about - the measured relative size of the term was 0.0016 on training pairs
+    and 0.0000 on test pairs.
+
+    Factorising through per-perturbation vectors fixes that: an unseen pair (a, b)
+    still has w_a and w_b, so Lambda_ab is defined. This is the same argument the
+    generators already obey - nothing may be indexed by a pair, or unseen
+    combinations are not expressible.
+
+    Antisymmetry survives: w_a^T J w_b is a scalar, so it equals its own
+    transpose w_b^T J^T w_a = -w_b^T J w_a. Hence Lambda_ab = -Lambda_ba and
+    Lambda_aa = 0, and the composed field stays permutation invariant.
+
+    `scale` starts at `init` (0 by default) so the model still begins exactly
+    additive. It is the only parameter with a gradient at that point, so it opens
+    the gate first and the factors learn afterwards.
     """
 
-    def __init__(self, n_perturbations: int, init: float = 0.0):
+    def __init__(self, n_perturbations: int, init: float = 0.0, rank: int = 16):
         super().__init__()
-        self.raw = torch.nn.Parameter(torch.full((n_perturbations, n_perturbations), init))
+        self.scale = torch.nn.Parameter(torch.tensor(float(init)))
+        self.factors = torch.nn.Parameter(torch.randn(n_perturbations, rank) * 0.3)
+        self.coupling = torch.nn.Parameter(torch.randn(rank, rank) * 0.3)
+
+    def _antisymmetric_coupling(self) -> torch.Tensor:
+        return 0.5 * (self.coupling - self.coupling.T)
 
     def forward(self, a: int, b: int) -> torch.Tensor:
-        return 0.5 * (self.raw[a, b] - self.raw[b, a])
+        j = self._antisymmetric_coupling()
+        return self.scale * (self.factors[a] @ j @ self.factors[b])
 
     def matrix(self) -> torch.Tensor:
-        return 0.5 * (self.raw - self.raw.T)
+        j = self._antisymmetric_coupling()
+        return self.scale * (self.factors @ j @ self.factors.T)
 
 
 class FreeInteraction(torch.nn.Module):

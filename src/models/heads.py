@@ -94,7 +94,25 @@ class HurdleHead(nn.Module):
         else:
             magnitude_loss = ((residual ** 2) * observed).sum() / denominator
         total = magnitude_loss + self.bce_weight * gate_loss
-        return total, {"recon": float(magnitude_loss), "gate_bce": float(gate_loss)}
+        # A Gaussian NLL is a log-DENSITY, so it goes negative once sigma drops
+        # below 1 - normal, but unreadable in a log and not a number to put in a
+        # paper. rmse is the same fit expressed positively; sigma is reported so a
+        # variance collapse (the known pathology of this loss, where shrinking
+        # sigma improves the objective without improving predictions) is visible
+        # rather than hidden inside the NLL.
+        parts = {"recon": float(magnitude_loss), "gate_bce": float(gate_loss),
+                 "rmse": float((((residual ** 2) * observed).sum()
+                                / denominator).sqrt())}
+        if self.magnitude_mode == "gaussian":
+            sigma = float(params["log_scale"].exp().mean())
+            parts["sigma"] = sigma
+            # A Gaussian NLL falls when sigma shrinks, whether or not the fit
+            # improved - the known failure mode of this loss. calib = sigma/rmse
+            # separates the two: near 1 the predicted spread matches the actual
+            # error, and a drift toward 0 means the objective is being lowered by
+            # shrinking sigma alone.
+            parts["calib"] = sigma / max(parts["rmse"], 1e-8)
+        return total, parts
 
     def point_estimate(self, params: dict, **_) -> torch.Tensor:
         """How the binary event is realised at inference. Three different answers:

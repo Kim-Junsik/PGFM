@@ -15,41 +15,45 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-HEADER = (f"{'run':30s} {'backbone':11s} {'gen':13s} {'interaction':11s} "
+HEADER = (f"{'run':34s} {'backbone':11s} {'gen':13s} {'interaction':11s} "
           f"{'resid_R2':>9s} {'edist':>8s} {'floor':>8s}")
 
 
 def load_baselines() -> dict:
+    """(dataset, method) -> baseline results."""
     out = {}
     for path in glob.glob("results/baselines_*.json"):
-        method = os.path.basename(path)[len("baselines_"):-len(".json")]
-        out[method] = json.load(open(path))["results"]
+        stem = os.path.basename(path)[len("baselines_"):-len(".json")]
+        dataset, _, method = stem.rpartition("_")
+        out[(dataset, method)] = json.load(open(path))["results"]
     return out
 
 
 def row(name: str, payload: dict) -> str:
     model = payload["config"]["model"]
     r = payload["results"]
-    return (f"{name[:29]:30s} {model.get('backbone', 'mlp'):11s} "
+    return (f"{name[:33]:34s} {model.get('backbone', 'mlp'):11s} "
             f"{model.get('generator', '-'):13s} {model.get('interaction', '-'):11s} "
             f"{r['resid_R2_pooled']:9.4f} {r['edist_rel']:8.4f} "
             f"{r.get('edist_rel_autoencoder_floor', float('nan')):8.4f}")
 
 
-def print_target_line(baselines: dict, method: str) -> None:
-    if method not in baselines:
-        return
-    ridge = baselines[method].get("ridge_additive", {})
+def print_target_line(baselines: dict, dataset: str, method: str) -> None:
+    ridge = baselines.get((dataset, method), {}).get("ridge_additive")
     if not ridge:
+        print(f"\ntarget ({dataset}, {method}): none - run data_prepare.py first")
         return
-    print(f"\n목표선 ({method}, ridge_additive):  "
+    print(f"\ntarget ({dataset}, {method}, ridge_additive):  "
           f"resid_R2 > {ridge['resid_R2_pooled']:.4f}   "
-          f"edist_rel < {ridge['edist_rel']:.4f}")
+          f"edist_rel < {ridge['edist_rel']:.4f}   "
+          f"(n={ridge['n_evaluated']})")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", default=None, help="a single run directory")
+    parser.add_argument("--filter", default=None,
+                        help="only runs whose name contains this, e.g. s2_mlp")
     args = parser.parse_args()
 
     baselines = load_baselines()
@@ -59,23 +63,28 @@ def main() -> None:
     paths = ([os.path.join(args.run, "results.json")] if args.run
              else sorted(glob.glob("results/runs/*/results.json")))
     paths = [p for p in paths if os.path.exists(p)]
+    if args.filter:
+        paths = [p for p in paths if args.filter in os.path.basename(os.path.dirname(p))]
     if not paths:
         print("no results.json found. train first:  sh train.sh")
         return
 
     print(HEADER)
     print("-" * len(HEADER))
-    methods = set()
+    seen = set()
     for path in paths:
         payload = json.load(open(path))
-        methods.add(payload["config"]["split"]["method"])
+        cache = payload["config"]["data"]["cache_h5ad"]
+        seen.add((os.path.splitext(os.path.basename(cache))[0],
+                  payload["config"]["split"]["method"]))
         print(row(os.path.basename(os.path.dirname(path)), payload))
 
-    for method in sorted(methods):
-        print_target_line(baselines, method)
+    for dataset, method in sorted(seen):
+        print_target_line(baselines, dataset, method)
 
-    print("\nfloor 는 수송을 끈 오토인코더 성능이다. edist 가 floor 와 같으면 flow 가"
-          "\n아무 일도 하지 않은 것이므로, 그 상태의 interaction 비교는 의미가 없다.")
+    print("\nfloor is the autoencoder with transport switched off. edist equal to"
+          "\nfloor means the flow did nothing, so comparing interactions in that"
+          "\nstate says nothing.")
 
 
 if __name__ == "__main__":

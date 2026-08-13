@@ -1,0 +1,16 @@
+# Shell scripts must keep LF endings. A CRLF checkout makes Linux look for
+# an interpreter called "/bin/sh" and fail with "bad interpreter".
+*.sh text eol=lf
+
+# Python is read by an interpreter that does not care, but keeping it LF
+# avoids whole-file diffs when the repo moves between Windows and Linux.
+*.py text eol=lf
+*.md text eol=lf
+
+# Never touch binary artifacts.
+*.pdf binary
+*.png binary
+*.h5ad binary
+*.pkl binary
+*.npz binary
+*.pt binary

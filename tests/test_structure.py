@@ -109,7 +109,7 @@ def test_zero_gate_recovers_exact_additivity(state, generator):
     z, t = state
     field = build(generator=generator, gate_init=0.0)
     with torch.no_grad():
-        field.gate.raw.zero_()
+        field.gate.scale.zero_()
     additive = field.generator(z, t, 0) + field.generator(z, t, 1)
     assert torch.allclose(field(z, t, [0, 1]), additive, atol=1e-12)
 
@@ -125,8 +125,44 @@ def test_permutation_invariance(state, interaction):
 def test_gate_matrix_is_antisymmetric():
     field = build()
     matrix = field.gate.matrix()
-    assert torch.allclose(matrix, -matrix.T, atol=1e-12)
-    assert matrix.diagonal().abs().max() < 1e-12
+    assert torch.allclose(matrix, -matrix.T, atol=1e-10)
+    assert matrix.diagonal().abs().max() < 1e-10
+
+
+def test_gate_is_defined_for_pairs_never_trained():
+    """The gate must not be a [P, P] table.
+
+    A pair-indexed gate keeps its initial value on any pair absent from training,
+    so Lambda_ab = 0 there and the bracket term vanishes at evaluation - measured
+    on a real run: |Lambda| 0.076 over the 88 training doubles, exactly 0.0 over
+    the 37 evaluation doubles, making `commutator` identical to `additive` on the
+    conditions the paper is about.
+
+    Simulating that: train the gate on a few pairs only, then check the untouched
+    ones still produce a non-zero weight.
+    """
+    field = build()
+    trained = [(0, 1), (0, 2), (1, 2)]
+    optimiser = torch.optim.SGD(field.gate.parameters(), lr=0.1)
+    for _ in range(20):
+        loss = sum((field.gate(a, b) - 1.0) ** 2 for a, b in trained)
+        optimiser.zero_grad()
+        loss.backward()
+        optimiser.step()
+
+    untouched = [(3, 4), (4, 5), (3, 5)]
+    for a, b in untouched:
+        assert abs(float(field.gate(a, b))) > 1e-6, (
+            f"pair ({a}, {b}) was never trained and has no gate weight; the gate "
+            f"is indexed by a pair again")
+
+
+def test_no_gate_parameter_is_pair_shaped():
+    """[P, P] anywhere in the gate is the bug this test exists for."""
+    field = build()
+    for name, parameter in field.gate.named_parameters():
+        assert tuple(parameter.shape) != (N_PERTURBATIONS, N_PERTURBATIONS), (
+            f"gate.{name} is {tuple(parameter.shape)} - pair-indexed")
 
 
 # ---------------------------------------------------------------- integrator
@@ -148,6 +184,6 @@ def test_no_parameter_is_indexed_by_a_pair():
     field = build()
     for name, parameter in field.named_parameters():
         if name.startswith("gate."):
-            continue
+            continue  # checked separately by the two gate tests above
         assert N_PERTURBATIONS not in parameter.shape[1:], (
             f"{name} has shape {tuple(parameter.shape)}, which looks pair-indexed")
