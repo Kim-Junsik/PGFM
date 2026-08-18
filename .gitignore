@@ -10,7 +10,11 @@
 *.zip
 
 # --- 평가 전용 python 3.11 환경 (cell-eval 0.5.42) ---
+# 두 개인 이유: .env-celleval 은 Windows 임베디드 파이썬이라 컨테이너 안에서는
+# 보이기만 하고 실행되지 않는다. Linux 쪽은 scripts/setup_celleval_linux.sh 로
+# 만들고, run_celleval.py 가 실제로 실행 가능한 쪽을 골라 쓴다.
 .env-celleval/
+.env-celleval-linux/
 
 # --- assets: 전부 재생성 가능하므로 추적하지 않는다 ---
 #   kegg/               scripts/download_kegg.py

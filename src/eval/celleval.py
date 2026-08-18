@@ -36,8 +36,8 @@ def to_celleval_label(condition: str, naming) -> str:
 
 
 def build_pair(vae, field, data, fold: dict, config: dict,
-               rng: np.random.Generator,
-               max_cells: int | None = None) -> tuple[ad.AnnData, ad.AnnData]:
+               rng: np.random.Generator, max_cells: int | None = None,
+               genes: np.ndarray | None = None) -> tuple[ad.AnnData, ad.AnnData]:
     """Predicted and real AnnData over the fold's test conditions plus control.
 
     For every test condition the prediction transports a fresh sample of control
@@ -81,23 +81,31 @@ def build_pair(vae, field, data, fold: dict, config: dict,
 
     def assemble(blocks, labels):
         matrix = np.concatenate(blocks, axis=0).astype(np.float32)
+        names = data.gene_names
+        if genes is not None:
+            # Subset AFTER transport, not before: the model needs its full input
+            # space to predict at all, and only the scoring is restricted.
+            matrix, names = matrix[:, genes], names[genes]
         obs = pd.DataFrame({PERT_COL: pd.Categorical(labels)},
                            index=[f"cell{i}" for i in range(matrix.shape[0])])
-        var = pd.DataFrame(index=pd.Index(data.gene_names))
+        var = pd.DataFrame(index=pd.Index(names))
         return ad.AnnData(X=matrix, obs=obs, var=var)
 
     return assemble(pred_blocks, pred_labels), assemble(real_blocks, real_labels)
 
 
 def export(vae, field, data, fold: dict, config: dict, out_dir: str,
-           rng: np.random.Generator, max_cells: int | None = None) -> dict[str, str]:
+           rng: np.random.Generator, max_cells: int | None = None,
+           genes: np.ndarray | None = None) -> dict[str, str]:
     import os
     os.makedirs(out_dir, exist_ok=True)
-    adata_pred, adata_real = build_pair(vae, field, data, fold, config, rng, max_cells)
+    adata_pred, adata_real = build_pair(vae, field, data, fold, config, rng,
+                                        max_cells, genes)
     paths = {"pred": os.path.join(out_dir, "pred.h5ad"),
              "real": os.path.join(out_dir, "real.h5ad")}
     adata_pred.write_h5ad(paths["pred"])
     adata_real.write_h5ad(paths["real"])
     paths["n_cells"] = str(adata_pred.n_obs)
     paths["n_conditions"] = str(adata_pred.obs[PERT_COL].nunique())
+    paths["n_genes"] = str(adata_pred.n_vars)
     return paths

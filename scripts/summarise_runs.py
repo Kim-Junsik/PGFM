@@ -8,6 +8,7 @@ the line it had to beat.
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import json
 import os
@@ -17,6 +18,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 HEADER = (f"{'run':34s} {'backbone':11s} {'gen':13s} {'interaction':11s} "
           f"{'resid_R2':>9s} {'edist':>8s} {'floor':>8s}")
+
+# cell-eval writes one agg_results.csv per run and nothing joins them, so a sweep
+# leaves six files and no table. These are the columns worth putting side by side;
+# anything else cell-eval produced is named at the bottom rather than dropped
+# silently. Order is the display order, and a column missing from the profile that
+# was run is skipped rather than shown empty.
+CELLEVAL_COLUMNS = (
+    ("mse", "mse"),
+    ("mae", "mae"),
+    ("pearson_delta", "pearson_d"),
+    ("discrimination_score_l1", "PDS"),
+    ("de_spearman_lfc_sig", "DE_spear"),
+    ("overlap_at_N", "overlap"),
+)
 
 
 def load_baselines() -> dict:
@@ -38,6 +53,54 @@ def row(name: str, payload: dict) -> str:
             f"{r.get('edist_rel_autoencoder_floor', float('nan')):8.4f}")
 
 
+def load_celleval(run_dir: str) -> dict[str, str] | None:
+    """The `mean` row of a run's agg_results.csv, or None if it was never scored.
+
+    cell-eval writes the file as statistic-per-row (count, mean, std, quartiles),
+    so the mean over the fold's test conditions is one row rather than a column.
+    """
+    path = os.path.join(run_dir, "celleval", "agg_results.csv")
+    if not os.path.exists(path):
+        return None
+    with open(path, newline="", encoding="utf-8") as handle:
+        for record in csv.DictReader(handle):
+            if record.get("statistic") == "mean":
+                return {k: v for k, v in record.items() if k != "statistic"}
+    return None
+
+
+def print_celleval(entries: list[tuple[str, dict | None]]) -> None:
+    scored = [(name, values) for name, values in entries if values]
+    if not scored:
+        print("\nno cell-eval results found. score a run with:"
+              "\n  python scripts/run_celleval.py results/runs/<tag> --profile full")
+        return
+
+    present = [(key, label) for key, label in CELLEVAL_COLUMNS
+               if any(key in values for _, values in scored)]
+    header = f"{'run':34s} " + " ".join(f"{label:>11s}" for _, label in present)
+    print("\n" + header)
+    print("-" * len(header))
+    for name, values in scored:
+        cells = []
+        for key, _ in present:
+            raw = values.get(key)
+            try:
+                cells.append(f"{float(raw):11.4f}")
+            except (TypeError, ValueError):
+                cells.append(f"{'-':>11s}")
+        print(f"{name[:33]:34s} " + " ".join(cells))
+
+    missing = [name for name, values in entries if not values]
+    if missing:
+        print(f"not scored: {', '.join(missing)}")
+
+    shown = {key for key, _ in present}
+    extra = sorted({k for _, values in scored for k in values} - shown)
+    if extra:
+        print(f"also in agg_results.csv: {', '.join(extra)}")
+
+
 def print_target_line(baselines: dict, dataset: str, method: str) -> None:
     ridge = baselines.get((dataset, method), {}).get("ridge_additive")
     if not ridge:
@@ -54,6 +117,8 @@ def main() -> None:
     parser.add_argument("--run", default=None, help="a single run directory")
     parser.add_argument("--filter", default=None,
                         help="only runs whose name contains this, e.g. s2_mlp")
+    parser.add_argument("--celleval", action="store_true",
+                        help="also join each run's celleval/agg_results.csv")
     args = parser.parse_args()
 
     baselines = load_baselines()
@@ -72,15 +137,22 @@ def main() -> None:
     print(HEADER)
     print("-" * len(HEADER))
     seen = set()
+    entries = []
     for path in paths:
         payload = json.load(open(path))
         cache = payload["config"]["data"]["cache_h5ad"]
         seen.add((os.path.splitext(os.path.basename(cache))[0],
                   payload["config"]["split"]["method"]))
-        print(row(os.path.basename(os.path.dirname(path)), payload))
+        run_dir = os.path.dirname(path)
+        name = os.path.basename(run_dir)
+        print(row(name, payload))
+        entries.append((name, run_dir))
 
     for dataset, method in sorted(seen):
         print_target_line(baselines, dataset, method)
+
+    if args.celleval:
+        print_celleval([(name, load_celleval(run_dir)) for name, run_dir in entries])
 
     print("\nfloor is the autoencoder with transport switched off. edist equal to"
           "\nfloor means the flow did nothing, so comparing interactions in that"
