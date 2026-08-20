@@ -27,7 +27,7 @@ from src.eval import baselines
 from src.eval.predict import evaluate_model
 from src.models.flow import LieCFMField
 from src.models.backbones import build_backbone
-from src.train.loop import train_stage1, train_stage2
+from src.train.loop import train_stage1, train_stage2, training_rows
 
 
 def build_logger(path: str):
@@ -78,6 +78,13 @@ def main() -> None:
     sampler = ConditionSampler(data, train_conditions, config["train"]["batch_size"], rng)
     log(f"train conditions: {len(sampler.singles)} singles + {len(sampler.doubles)} doubles")
 
+    # Every cell a model is allowed to see. Stage 1 and the latent standardisation
+    # both draw from here, so no held-out condition reaches the encoder.
+    allowed = training_rows(data, train_conditions)
+    held_out = data.x.shape[0] - len(allowed)
+    log(f"cells visible to training: {len(allowed):,} / {data.x.shape[0]:,}  "
+        f"({held_out:,} held-out cells excluded)")
+
     vae = build_backbone(config, data.n_genes, data.gene_names).to(device)
     field = LieCFMField(config, data.n_perturbations).to(device)
     log(f"backbone={config['model']['backbone']} head={config['model']['decoder_head']}")
@@ -86,10 +93,10 @@ def main() -> None:
 
     started = time.time()
     log("\n=== stage 1: autoencoding ===")
-    train_stage1(vae, data, config, device, rng, log)
+    train_stage1(vae, data, config, device, rng, log, allowed)
 
     log("\n=== stage 2: latent flow matching ===")
-    train_stage2(vae, field, data, sampler, config, device, rng, log)
+    train_stage2(vae, field, data, sampler, config, device, rng, log, allowed)
     log(f"\ntrained in {time.time() - started:.1f}s")
 
     log("\n=== evaluation (same protocol as the baselines) ===")

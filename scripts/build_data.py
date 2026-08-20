@@ -78,11 +78,26 @@ def main() -> None:
     var_names = io.read_var_names(raw_path)
     conditions = io.read_obs_column(raw_path, "condition")
 
+    # Rows the gene selection is allowed to see. With exclude_test_from_hvg the
+    # fold's held-out conditions are dropped, so nothing about them influences
+    # which genes the model is built from. That makes the CACHE fold-specific -
+    # give each fold its own data.cache_h5ad path.
+    keep = None
+    if config["data"].get("exclude_test_from_hvg"):
+        from src.data import splits
+        method = config["split"]["method"]
+        fold = splits.folds(config, method)[config["split"]["fold"]]
+        held = set(fold["test"])
+        keep = np.flatnonzero(~np.isin(conditions, list(held)))
+        print(f"  excluding {n_obs - len(keep):,} cells of {len(held)} held-out "
+              f"conditions from gene selection (fold {config['split']['fold']})")
+
     started = time.time()
-    mean, variance = preprocess.gene_statistics(raw_path, config["data"]["chunk_size"])
+    mean, variance = preprocess.gene_statistics(raw_path, config["data"]["chunk_size"], keep)
     print(f"  done in {time.time() - started:.1f}s")
 
-    gene_indices, stats = preprocess.select_genes(config, var_names, conditions, mean, variance)
+    gene_indices, stats = preprocess.select_genes(config, var_names, conditions,
+                                                 mean, variance, raw_path, keep)
     print(f"\n=== 3. gene selection ({stats['criterion']}) ===")
     print(f"  top-n_hvg                    : {stats['n_hvg']:,}")
     print(f"  perturbation targets         : {stats['n_targets']}")

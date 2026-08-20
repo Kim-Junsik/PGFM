@@ -25,8 +25,17 @@ DEFAULTS: dict[str, Any] = {
         # non-integer, no raw-count layer). Never re-apply normalize_total/log1p.
         "assume_prenormalised": True,
         "n_hvg": 3000,  # null selects every gene
-        "hvg_criterion": "raw_variance",  # raw_variance | dispersion
+        "hvg_criterion": "raw_variance",  # raw_variance | dispersion | scanpy
+        # scanpy calls sc.pp.highly_variable_genes with its seurat default,
+        # which is what scDFM uses. dispersion is a plain variance/mean ratio
+        # and picks a different set - the two differ by 1.6x in Control L2.
         "force_include_targets": True,
+        # Exclude the fold's held-out conditions from the cells that CHOOSE the
+        # gene space. scDFM does not do this - its HVG call runs over the whole
+        # dataset - so turning it on makes our problem strictly harder than the
+        # published one, and the cache becomes fold-specific. Off by default for
+        # that reason; run.sh turns it on because a zero-shot claim needs it.
+        "exclude_test_from_hvg": False,
         # Condition naming. Norman writes 'AHR+FEV' / 'AHR+ctrl' / 'ctrl';
         # other datasets use 'control' or 'DMSO'. Read through
         # src/data/conventions.py, never hardcoded.
@@ -89,7 +98,7 @@ DEFAULTS: dict[str, Any] = {
         "hurdle_gate": "sample",  # soft | hard | sample
         # point pins the magnitude to its conditional mean (what plain MSE does);
         # gaussian learns a dispersion so the magnitude can be drawn as well.
-        "hurdle_magnitude": "gaussian",  # point | gaussian
+        "hurdle_magnitude": "gaussian",  # point <- MSE | gaussian
         # --- transformer backbone ---
         "transformer_width": 128,
         "transformer_tokens": 32,
@@ -154,6 +163,22 @@ DEFAULTS: dict[str, Any] = {
         # matching on its own.
         "stage2_recon_weight": 1.0,
         "single_warmup_epochs": 10,  # singles only before combinations join
+        # --- composition residual, the term that puts D into the loss ---
+        # Measured on a finished run: ||int(u_a+u_b) - (int u_a + int u_b)|| is
+        # 0.9945 of the sum itself, while the DATA is only 12% non-additive
+        # (||d_AB|| / ||d_A + d_B|| = 0.879). The model invents eight times the
+        # non-additivity it should, and nothing in the loss refers to that
+        # quantity, so nothing stops it. This term supervises exactly it.
+        #
+        # 0 disables. The latent residual it matches is preserved by the encoder
+        # (its share of the signal is 0.575 in latent vs 0.393 in gene space), so
+        # supervising in latent space is not throwing information away.
+        "resid_weight": 0.0,
+        # Integration steps for that term only. The residual is a population-mean
+        # quantity, so one point is integrated rather than the batch, and step
+        # count was measured not to matter (resid_R2 -0.9577 at 20 steps vs
+        # -0.9825 at 100). Small keeps the kernel-launch cost down.
+        "resid_steps": 5,
         # --- minibatch OT coupling; never random pairing ---
         "coupling": "uot",  # uot | ot | random (random is a control only)
         "uot_reg": 0.05,

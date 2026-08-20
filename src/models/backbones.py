@@ -60,10 +60,22 @@ class BaseBackbone(nn.Module):
         self.register_buffer("latent_std", torch.ones(latent_dim))
 
     @torch.no_grad()
-    def fit_latent_scale(self, x: torch.Tensor) -> tuple[float, float]:
+    def fit_latent_scale(self, x: torch.Tensor, chunk: int = 512) -> tuple[float, float]:
+        """Standardisation statistics over `x`, encoded in chunks.
+
+        The caller hands this 8,192 cells while training runs at batch 256, so an
+        unchunked forward is the largest single allocation in the whole run by a
+        factor of 32 - it is what ran the gpu out of memory on pcab at 5,000
+        genes, before stage 2 had taken a single step.
+
+        Chunking changes nothing numerically: only the latents are kept, and
+        8,192 x 64 floats is 2 MB, so mean and std are still taken over every row
+        at once after the concatenation.
+        """
         was_training = self.training
         self.eval()
-        mu, _ = self.encode(x)
+        mu = torch.cat([self.encode(x[start:start + chunk])[0]
+                        for start in range(0, x.shape[0], chunk)], dim=0)
         self.latent_mean.copy_(mu.mean(dim=0))
         self.latent_std.copy_(mu.std(dim=0).clamp(min=1e-6))
         self.train(was_training)

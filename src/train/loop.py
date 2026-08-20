@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from ..data.dataset import ConditionSampler, PerturbationData, condition_genes
+from ..models.flow import integrate
 from ..data.counts import recover_counts
 from .coupling import sample_pairs
 
@@ -35,12 +36,95 @@ def _aux(x: torch.Tensor, config: dict) -> dict:
     return {"counts": counts, "library": library}
 
 
+@torch.no_grad()
+def latent_residual_targets(vae, data: PerturbationData, sampler: ConditionSampler,
+                            device: str, n_cells: int = 512) -> dict:
+    """z_AB - z_A - z_B + z_ctrl for every TRAINING double, computed once.
+
+    This is the quantity resid_R2 scores, expressed in the latent space. Nothing
+    in the stage-2 loss referred to it before, which is why the model was free to
+    invent a composition non-additivity 8x larger than the data's.
+
+    Computed once rather than per step: stage 2 freezes the VAE, so these targets
+    cannot move between epochs, and re-encoding the same cells every step would
+    cost the largest allocation in the loop for a constant.
+
+    A double whose singles are not both present is skipped - its residual is not
+    defined - so the returned dict may be smaller than sampler.doubles.
+    """
+    naming = data.naming
+    have = set(data.rows)
+
+    def single_of(gene: str):
+        for form in naming.single_forms(gene):
+            if form in have:
+                return form
+        return None
+
+    def mean_latent(condition: str) -> torch.Tensor:
+        cells = data.cells(condition)
+        if cells.shape[0] > n_cells:
+            cells = cells[:n_cells]
+        return vae.encode_z(_to_device(cells, device))[0].mean(dim=0, keepdim=True)
+
+    control = mean_latent(data.control_condition)
+    cache: dict[str, torch.Tensor] = {}
+    targets: dict[str, torch.Tensor] = {}
+    for condition in sampler.doubles:
+        a, b = naming.genes(condition)
+        sa, sb = single_of(a), single_of(b)
+        if sa is None or sb is None:
+            continue
+        for name in (condition, sa, sb):
+            if name not in cache:
+                cache[name] = mean_latent(name)
+        targets[condition] = (cache[condition] - cache[sa] - cache[sb] + control)
+    return {"targets": targets, "control": control}
+
+
+def composition_residual(field, z0: torch.Tensor, perturbations: list[int],
+                         n_steps: int) -> torch.Tensor:
+    """Phi_ab(z0) - Phi_a(z0) - Phi_b(z0) + z0, on a single point.
+
+    resid_R2 is a statement about population MEANS, so integrating the mean of z0
+    supervises the same quantity as integrating every cell would, at 1/batch_size
+    the cost. z0 is expected to be [1, latent_dim].
+    """
+    a, b = perturbations
+    both = integrate(field, z0, [a, b], n_steps)
+    only_a = integrate(field, z0, [a], n_steps)
+    only_b = integrate(field, z0, [b], n_steps)
+    return both - only_a - only_b + z0
+
+
+def training_rows(data: PerturbationData, conditions) -> np.ndarray:
+    """Row indices of the cells a model is allowed to see.
+
+    Stage 1 used to draw from every cell in the cache, which meant the encoder and
+    the latent standardisation both read the expression profiles of the held-out
+    conditions - 10,643 cells, 12.5% of the dataset. That is transductive
+    representation learning, and it invalidates a zero-shot combination claim even
+    though no perturbation LABEL leaks.
+
+    Control is added explicitly: it is never held out, every prediction starts from
+    it, and it is not part of `training_conditions` for the additive split.
+    """
+    wanted = set(conditions) | {data.control_condition}
+    rows = [data.rows[c] for c in sorted(wanted) if c in data.rows]
+    return np.concatenate(rows) if rows else np.arange(data.x.shape[0])
+
+
 def train_stage1(vae, data: PerturbationData, config: dict, device: str,
-                 rng: np.random.Generator, log) -> None:
+                 rng: np.random.Generator, log,
+                 rows_allowed: np.ndarray | None = None) -> None:
     train_cfg = config["train"]
     optimiser = torch.optim.AdamW(vae.parameters(), lr=train_cfg["lr"],
                                   weight_decay=train_cfg["weight_decay"])
-    n_cells = data.x.shape[0]
+    # None keeps the old behaviour (every cell). Callers that care about leakage
+    # pass the training rows; scripts/train.py does.
+    pool = (np.arange(data.x.shape[0]) if rows_allowed is None
+            else np.asarray(rows_allowed))
+    n_cells = len(pool)
     batch_size = train_cfg["batch_size"]
     steps = max(n_cells // batch_size, 1)
     if train_cfg["max_steps_per_epoch"]:
@@ -50,7 +134,7 @@ def train_stage1(vae, data: PerturbationData, config: dict, device: str,
     for epoch in range(train_cfg["stage1_epochs"]):
         totals: dict[str, float] = {}
         for _ in range(steps):
-            rows = rng.choice(n_cells, size=batch_size, replace=False)
+            rows = pool[rng.choice(n_cells, size=batch_size, replace=False)]
             x = _to_device(data.x[rows], device)
             params, mu, logvar = vae(x)
             recon, parts = vae.loss(params, x, **_aux(x, config))
@@ -75,7 +159,8 @@ def train_stage1(vae, data: PerturbationData, config: dict, device: str,
 
 
 def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
-                 config: dict, device: str, rng: np.random.Generator, log) -> None:
+                 config: dict, device: str, rng: np.random.Generator, log,
+                 rows_allowed: np.ndarray | None = None) -> None:
     train_cfg = config["train"]
     parameters = list(field.parameters())
     if train_cfg["finetune_vae_in_stage2"]:
@@ -83,10 +168,22 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
     optimiser = torch.optim.AdamW(parameters, lr=train_cfg["lr"],
                                   weight_decay=train_cfg["weight_decay"])
 
-    scale_rows = rng.choice(data.x.shape[0], size=min(8192, data.x.shape[0]), replace=False)
+    # Same pool as stage 1: the standardisation statistics are part of the encoder,
+    # so reading held-out cells here leaks exactly as much as training on them.
+    pool = (np.arange(data.x.shape[0]) if rows_allowed is None
+            else np.asarray(rows_allowed))
+    scale_rows = pool[rng.choice(len(pool), size=min(8192, len(pool)), replace=False)]
     raw_norm, mean_std = vae.fit_latent_scale(_to_device(data.x[scale_rows], device))
     log(f"  latent standardised: raw ||std|| {raw_norm:.4f} -> unit "
         f"(mean per-dim std was {mean_std:.5f})")
+
+    resid_weight = train_cfg.get("resid_weight", 0.0)
+    resid = None
+    if resid_weight > 0:
+        resid = latent_residual_targets(vae, data, sampler, device)
+        sizes = [float(v.norm()) for v in resid["targets"].values()]
+        log(f"  composition residual on: {len(sizes)} training doubles, "
+            f"target ||r|| median {float(np.median(sizes)):.4f}")
 
     for epoch in range(train_cfg["stage2_epochs"]):
         if train_cfg["latent_renorm_every"] and epoch and                 epoch % train_cfg["latent_renorm_every"] == 0:
@@ -103,6 +200,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         field.train()
 
         total, total_match, count = 0.0, 0.0, 0
+        totals_resid: list[float] = []
         for condition in conditions:
             source, target, _ = sampler.batch(condition)
             perturbations = [data.pert_index[g] for g in condition_genes(condition)]
@@ -131,6 +229,15 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
             matching = torch.nn.functional.mse_loss(predicted, z1p - z0p)
             loss = matching
 
+            # The composition residual. Only doubles have one, and only the ones
+            # whose singles both exist in the data - see latent_residual_targets.
+            if resid is not None and condition in resid["targets"]:
+                r_model = composition_residual(field, z0.mean(dim=0, keepdim=True),
+                                               perturbations, train_cfg["resid_steps"])
+                r_loss = torch.nn.functional.mse_loss(r_model, resid["targets"][condition])
+                loss = loss + resid_weight * r_loss
+                totals_resid.append(float(r_loss))
+
             # Flow matching ALONE has a degenerate optimum when the encoder is
             # trainable: collapse the latent, and z1 - z0 becomes 0 so any field
             # scores perfectly. Measured before this term was added: ||z1 - z0||
@@ -150,6 +257,9 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
             count += 1
 
         phase = "singles" if singles_only else "all"
+        # resid is logged separately from fm so the two can be read apart: the
+        # whole point of the term is that it moves a quantity fm never saw.
+        extra = (f"  resid {np.mean(totals_resid):.5f}" if totals_resid else "")
         log(f"  stage2 epoch {epoch + 1:3d}/{train_cfg['stage2_epochs']}  "
             f"[{phase:7s}] loss {total / max(count, 1):.5f}  "
-            f"fm {total_match / max(count, 1):.5f}")
+            f"fm {total_match / max(count, 1):.5f}{extra}")

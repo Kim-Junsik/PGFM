@@ -25,7 +25,12 @@ INTERACTION=commutator   # additive | commutator | free_mlp
 
 # --- gene space: these are what make our numbers comparable to scDFM ---
 N_HVG=5000               # scDFM's run.sh uses --n_top_genes=5000
-HVG_CRITERION=dispersion # raw_variance | dispersion
+HVG_CRITERION=scanpy     # raw_variance | dispersion | scanpy
+                         # scanpy calls sc.pp.highly_variable_genes with its
+                         # seurat default, which is the single line scDFM's
+                         # Norman branch uses. Its normalisation, target forcing,
+                         # fold indexing and infer_top_gene all already match
+                         # ours; this was the last difference.
                          # raw_variance picks the largest ABSOLUTE effects, a
                          # harder gene set, and is most of why our L2 read so much
                          # worse than the published table. Measured on the same
@@ -36,17 +41,18 @@ HVG_CRITERION=dispersion # raw_variance | dispersion
 INFER_TOP_GENE=1000      # scDFM runs scanpy's HVG a SECOND time, over the test
                          # subset alone (--infer_top_gene=1000), and reports on
                          # those genes. 0 disables and scores the whole cache.
-CACHE=assets/norman_disp5000.h5ad
-                         # MUST be a new path whenever N_HVG or HVG_CRITERION
-                         # changes. Overwriting assets/norman_modeled.h5ad makes
-                         # every existing checkpoint unloadable - their decoders
-                         # emit 3,074 genes and would meet a different count.
-
 FOLD=1                   # scDFM's run.sh uses --fold=1; we had been on fold 0.
                          # NEITHER side runs k-fold: the shipped split file holds
                          # five independent 70/30 draws and each side picks one.
                          # Folds 0 and 1 share only 12 of their 37 test doubles,
                          # so this has to match before any number is comparable.
+
+CACHE=assets/norman_scanpy5000_fold${FOLD}.h5ad
+                         # MUST be a new path whenever N_HVG, HVG_CRITERION or
+                         # FOLD changes - with STRICT_SPLIT the gene selection
+                         # itself depends on the fold. Overwriting an old cache
+                         # makes its checkpoints unloadable: their decoders emit a
+                         # different gene count.
 
 BATCH=256               # Applies to BOTH stages; there is only one key.
                          # Stage 2 draws one batch per condition and conditions
@@ -55,9 +61,26 @@ BATCH=256               # Applies to BOTH stages; there is only one key.
                          # cells to the OT coupling. 256 is near the median on
                          # purpose. Raise it for stage-1 throughput knowing that.
 LR=1e-3                  # constant, no scheduler. Scale it with BATCH.
-STAGE1=500               # stage 1 was flat by epoch 28 at the old setting
-STAGE2=1000              # stage 2 was still falling at epoch 60 - not converged
-WARMUP=10                # singles-only epochs before combinations join stage 2
+STAGE1=30                # stage 1 was flat by epoch 28 at the old setting
+STAGE2=200              # stage 2 was still falling at epoch 60 - not converged
+WARMUP=60                # singles-only epochs before combinations join stage 2.
+                         # Raised from 10/200. The singles that actually compose
+                         # the test doubles reproduce only 0.646 of their true
+                         # displacement (cosine 0.695), yet had 5% of the schedule.
+
+# --- the two terms this run exists to test -------------------------------
+RESID_WEIGHT=1.0         # weight on the composition residual, the term that puts
+                         # ||Phi_ab - Phi_a - Phi_b + z0|| under supervision.
+                         # Measured without it: the model invents a composition
+                         # non-additivity of 0.9945 where the data has 0.121.
+                         # Nothing in the old loss referred to that quantity.
+                         # 0 disables.
+STRICT_SPLIT=true        # exclude the fold's held-out conditions from the cells
+                         # that CHOOSE the gene space, on top of excluding them
+                         # from stage 1 and the latent standardisation (which is
+                         # now unconditional). scDFM does NOT do this, so this
+                         # makes our problem strictly harder than the published
+                         # one - state it as such rather than hiding it.
 
 N_GEN=1024               # control cells transported per condition AT EVAL TIME.
                          # The old default of 256 left sampling noise in every
@@ -107,6 +130,7 @@ echo "=== configuration ==="
 echo "  backbone=$BACKBONE generator=$GENERATOR interaction=$INTERACTION"
 echo "  n_hvg=$N_HVG criterion=$HVG_CRITERION fold=$FOLD cache=$CACHE"
 echo "  batch=$BATCH lr=$LR stage1=$STAGE1 stage2=$STAGE2 warmup=$WARMUP"
+echo "  resid_weight=$RESID_WEIGHT strict_split=$STRICT_SPLIT"
 echo "  eval n_gen_cells=$N_GEN infer_top_gene=$INFER_TOP_GENE device=$DEVICE"
 echo "  runs: $TARGET_TAG$([ "$NO_CONTROL" -eq 0 ] && echo ", $CONTROL_TAG")"
 echo ""
@@ -119,7 +143,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
   # name, so the 3,074-gene target line is not overwritten.
   if [ ! -f "$CACHE" ]; then
     echo "=== building $CACHE (n_hvg=$N_HVG) ==="
-    python data_prepare.py --set data.n_hvg=$N_HVG data.hvg_criterion=$HVG_CRITERION data.cache_h5ad=$CACHE
+    python data_prepare.py --set data.n_hvg=$N_HVG data.hvg_criterion=$HVG_CRITERION data.cache_h5ad=$CACHE data.exclude_test_from_hvg=$STRICT_SPLIT split.fold=$FOLD
     echo ""
   else
     echo "using existing cache $CACHE"
@@ -158,5 +182,9 @@ python scripts/paper_table.py --filter "$TAG" --n-cells $N_GEN $INFER_FLAG \
   --csv "results/${TAG}_table.csv"
 
 echo ""
-echo "convergence check - fm must be flat over the last ~30 epochs:"
+echo "convergence check - fm must be flat over the last ~30 epochs, and resid"
+echo "must be FALLING; a run where only fm moves has ignored the new term:"
 echo "  grep 'stage2 epoch' results/runs/$TARGET_TAG/train.log | tail -30"
+echo ""
+echo "leakage check - this line must show fewer cells than the cache holds:"
+echo "  grep 'cells visible to training' results/runs/$TARGET_TAG/train.log"

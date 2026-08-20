@@ -115,9 +115,17 @@ def main() -> None:
     parser.add_argument("--csv", default=None)
     args = parser.parse_args()
 
-    runs = args.runs or sorted(glob.glob("results/runs/s2_*"))
-    if args.filter:
-        runs = [r for r in runs if args.filter in os.path.basename(r)]
+    # A --filter widens the search to every run, then narrows by name. Filtering
+    # the s2_* default instead made --filter useless for any other tag: the
+    # candidate list never contained the run being asked for, and the script said
+    # "no finished run matched" for a run sitting right there on disk.
+    if args.runs:
+        runs = args.runs
+    elif args.filter:
+        runs = [r for r in sorted(glob.glob("results/runs/*"))
+                if args.filter in os.path.basename(r)]
+    else:
+        runs = sorted(glob.glob("results/runs/s2_*"))
     runs = [r for r in runs if os.path.exists(os.path.join(r, "checkpoint.pt"))]
     if not runs:
         print("no finished run matched.")
